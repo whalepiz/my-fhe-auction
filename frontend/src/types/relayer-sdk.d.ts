@@ -1,1 +1,1 @@
-declare module '@zama-fhe/relayer-sdk/*';
+declare module '@zama-fhe/relayer-sdk/bundle';
