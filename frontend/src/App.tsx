@@ -12,20 +12,19 @@ type Wallet = { address: string | null; chainId: number | null };
 export default function App() {
   const [wallet, setWallet] = useState<Wallet>({ address: null, chainId: null });
   const [bid, setBid] = useState("");
+  const [busy, setBusy] = useState<null | string>(null); // trạng thái đang xử lý
 
   async function connect() {
     const anyWin = window as any;
     if (!anyWin.ethereum) return alert("MetaMask not found");
 
     const sepoliaHex = "0xaa36a7"; // 11155111
-    // Thử chuyển sang Sepolia trước
     try {
       await anyWin.ethereum.request({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: sepoliaHex }],
       });
     } catch (err: any) {
-      // Nếu Sepolia chưa có trong MM -> thêm rồi chuyển
       if (err?.code === 4902) {
         await anyWin.ethereum.request({
           method: "wallet_addEthereumChain",
@@ -48,7 +47,6 @@ export default function App() {
       }
     }
 
-    // Đã ở Sepolia -> connect
     const provider = new BrowserProvider(anyWin.ethereum);
     await anyWin.ethereum.request({ method: "eth_requestAccounts" });
     const signer = await provider.getSigner();
@@ -59,36 +57,47 @@ export default function App() {
   async function submitBid(e: React.FormEvent) {
     e.preventDefault();
     if (!wallet.address) return alert("Connect wallet first");
-
-    // kiểm tra số nguyên không âm
     if (!/^\d+$/.test(bid)) return alert("Bid must be a non-negative integer");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
 
-    // nếu đang ở chain khác -> gọi connect() để auto switch
-    const net = await provider.getNetwork();
-    if (Number(net.chainId) !== EXPECT_CHAIN_ID) {
-      await connect();
+    try {
+      setBusy("Encrypting bid…");
+      // đảm bảo đúng chain
+      const net = await provider.getNetwork();
+      if (Number(net.chainId) !== EXPECT_CHAIN_ID) {
+        await connect();
+      }
+      const signer = await provider.getSigner();
+
+      // 1) Khởi tạo FHE instance
+      const inst = await getFheInstance();
+
+      // 2) Tạo encrypted input & proof
+      const buf = inst.createEncryptedInput(AUCTION_ADDRESS, await signer.getAddress());
+      buf.add32(BigInt(bid));
+      const enc = await buf.encrypt(); // -> { handles, inputProof }
+
+      // 3) Gọi contract bid(handle, proof)
+      setBusy("Sending transaction…");
+      const contract = new Contract(AUCTION_ADDRESS, auctionAbi, signer);
+      const tx = await contract.bid(enc.handles[0], enc.inputProof);
+      await tx.wait();
+
+      alert(`Submitted encrypted bid = ${bid}`);
+      setBid("");
+    } catch (err: any) {
+      console.error("submitBid error:", err);
+      const msg =
+        err?.shortMessage ||
+        err?.info?.error?.message ||
+        err?.message ||
+        "Unknown error. Open console for details.";
+      alert("Bid failed: " + msg);
+    } finally {
+      setBusy(null);
     }
-
-    const signer = await provider.getSigner();
-
-    // 1) Khởi tạo FHE instance cho Sepolia
-    const inst = await getFheInstance();
-
-    // 2) Tạo encrypted input & proof
-    const buf = inst.createEncryptedInput(AUCTION_ADDRESS, await signer.getAddress());
-    buf.add32(BigInt(bid));
-    const enc = await buf.encrypt(); // => { handles: [bytes32,...], inputProof: bytes }
-
-    // 3) Gọi contract bid(handle, proof)
-    const contract = new Contract(AUCTION_ADDRESS, auctionAbi, signer);
-    const tx = await contract.bid(enc.handles[0], enc.inputProof);
-    await tx.wait();
-
-    alert(`Submitted encrypted bid = ${bid}`);
-    setBid("");
   }
 
   return (
@@ -116,8 +125,8 @@ export default function App() {
             style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
           />
         </label>
-        <button type="submit" style={{ padding: "10px 16px", borderRadius: 8 }}>
-          Submit encrypted bid
+        <button type="submit" disabled={!!busy} style={{ padding: "10px 16px", borderRadius: 8 }}>
+          {busy ? busy : "Submit encrypted bid"}
         </button>
       </form>
 
