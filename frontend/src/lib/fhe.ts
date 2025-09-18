@@ -1,19 +1,19 @@
 // src/lib/fhe.ts
-// Lazy import để tránh crash khi bundle được tải sớm trên browser/CDN.
+// Import tĩnh từ root package + chỉ init khi được gọi.
+import { initSDK, createInstance, SepoliaConfig } from '@zama-fhe/relayer-sdk';
+
 let _instPromise: Promise<any> | null = null;
+let _sdkInited = false;
 
-async function loadSdk() {
-  // Import động, chỉ khi cần
-  const sdk = await import('@zama-fhe/relayer-sdk/bundle'); // { initSDK, createInstance, SepoliaConfig }
-  await sdk.initSDK();
-  return sdk;
-}
-
+/** Khởi tạo instance Relayer SDK cho Sepolia (chỉ 1 lần) */
 export async function getFheInstance() {
   if (!_instPromise) {
     _instPromise = (async () => {
-      const sdk = await loadSdk();
-      return sdk.createInstance(sdk.SepoliaConfig);
+      if (!_sdkInited) {
+        await initSDK();      // tải WASM và init SDK
+        _sdkInited = true;
+      }
+      return createInstance(SepoliaConfig);
     })();
   }
   return _instPromise;
