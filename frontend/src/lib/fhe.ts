@@ -1,14 +1,16 @@
 // src/lib/fhe.ts
-// Dùng subpath /bundle để Vite resolve được; không gọi initSDK.
+// Import động từ /bundle để Vite resolve được.
+// Gọi initSDK nếu SDK có export, rồi tạo instance.
+
 let _instPromise: Promise<any> | null = null;
 
 export async function getFheInstance() {
   if (!_instPromise) {
     _instPromise = (async () => {
-      // subpath import, tránh lỗi "Missing '.' specifier"
       const mod: any = await import('@zama-fhe/relayer-sdk/bundle');
 
-      // fallback cho mọi kiểu export (named/default)
+      const initSDK =
+        mod?.initSDK || mod?.default?.initSDK || null;
       const createInstance =
         mod?.createInstance || mod?.default?.createInstance;
       const SepoliaConfig =
@@ -19,6 +21,12 @@ export async function getFheInstance() {
           'relayer-sdk/bundle import mismatch (createInstance/SepoliaConfig not found)'
         );
       }
+
+      // Một số phiên bản bundle yêu cầu initSDK trước khi dùng
+      if (typeof initSDK === 'function') {
+        await initSDK();
+      }
+
       return createInstance(SepoliaConfig);
     })();
   }
