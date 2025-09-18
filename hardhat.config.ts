@@ -8,79 +8,102 @@ import "hardhat-gas-reporter";
 import type { HardhatUserConfig } from "hardhat/config";
 import { vars } from "hardhat/config";
 import "solidity-coverage";
+import * as dotenv from "dotenv";
 
 import "./tasks/accounts";
 import "./tasks/FHECounter";
 
-// Run 'npx hardhat vars setup' to see the list of variables that need to be set
+// Load .env (fallback cho hardhat vars)
+dotenv.config();
 
-const MNEMONIC: string = vars.get("MNEMONIC", "test test test test test test test test test test test junk");
-const INFURA_API_KEY: string = vars.get("INFURA_API_KEY", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+/**
+ * Ưu tiên lấy từ `hardhat vars`, nếu không có thì dùng .env
+ * - npx hardhat vars set MNEMONIC / INFURA_API_KEY / ETHERSCAN_API_KEY (tuỳ bạn)
+ */
+const MNEMONIC: string = vars.get(
+  "MNEMONIC",
+  process.env.MNEMONIC ?? "test test test test test test test test test test test junk",
+);
+
+const INFURA_API_KEY: string = vars.get(
+  "INFURA_API_KEY",
+  process.env.INFURA_API_KEY ?? "",
+);
+
+const ETHERSCAN_API_KEY: string = vars.get(
+  "ETHERSCAN_API_KEY",
+  process.env.ETHERSCAN_API_KEY ?? "",
+);
+
+// Nếu bạn thích dùng PRIVATE_KEY thay vì mnemonic, đặt trong .env
+const PRIVATE_KEY: string = vars.get("PRIVATE_KEY", process.env.PRIVATE_KEY ?? "");
 
 const config: HardhatUserConfig = {
   defaultNetwork: "hardhat",
+
   namedAccounts: {
     deployer: 0,
   },
+
   etherscan: {
     apiKey: {
-      sepolia: vars.get("ETHERSCAN_API_KEY", ""),
+      sepolia: ETHERSCAN_API_KEY,
     },
   },
+
   gasReporter: {
     currency: "USD",
-    enabled: process.env.REPORT_GAS ? true : false,
+    enabled: !!process.env.REPORT_GAS,
     excludeContracts: [],
   },
+
   networks: {
     hardhat: {
-      accounts: {
-        mnemonic: MNEMONIC,
-      },
+      accounts: { mnemonic: MNEMONIC },
       chainId: 31337,
     },
+
+    // JSON-RPC local (hardhat node)
+    localhost: {
+      chainId: 31337,
+      url: "http://127.0.0.1:8545",
+    },
+
+    // Tuỳ chọn: anvil
     anvil: {
-      accounts: {
-        mnemonic: MNEMONIC,
-        path: "m/44'/60'/0'/0/",
-        count: 10,
-      },
+      accounts: { mnemonic: MNEMONIC, path: "m/44'/60'/0'/0/", count: 10 },
       chainId: 31337,
       url: "http://localhost:8545",
     },
+
+    // Sepolia (ưu tiên PRIVATE_KEY; nếu không có sẽ dùng MNEMONIC)
     sepolia: {
-      accounts: {
-        mnemonic: MNEMONIC,
-        path: "m/44'/60'/0'/0/",
-        count: 10,
-      },
       chainId: 11155111,
-      url: `https://sepolia.infura.io/v3/${INFURA_API_KEY}`,
+      url:
+        process.env.SEPOLIA_RPC_URL ||
+        (INFURA_API_KEY ? `https://sepolia.infura.io/v3/${INFURA_API_KEY}` : "https://eth-sepolia.public.blastapi.io"),
+      accounts: PRIVATE_KEY
+        ? [PRIVATE_KEY]
+        : { mnemonic: MNEMONIC, path: "m/44'/60'/0'/0/", count: 10 },
     },
   },
+
   paths: {
     artifacts: "./artifacts",
     cache: "./cache",
     sources: "./contracts",
     tests: "./test",
   },
+
   solidity: {
     version: "0.8.27",
     settings: {
-      metadata: {
-        // Not including the metadata hash
-        // https://github.com/paulrberg/hardhat-template/issues/31
-        bytecodeHash: "none",
-      },
-      // Disable the optimizer when debugging
-      // https://hardhat.org/hardhat-network/#solidity-optimizer-support
-      optimizer: {
-        enabled: true,
-        runs: 800,
-      },
+      metadata: { bytecodeHash: "none" },
+      optimizer: { enabled: true, runs: 800 },
       evmVersion: "cancun",
     },
   },
+
   typechain: {
     outDir: "types",
     target: "ethers-v6",
