@@ -16,29 +16,68 @@ export default function App() {
   async function connect() {
     const anyWin = window as any;
     if (!anyWin.ethereum) return alert("MetaMask not found");
+
+    const sepoliaHex = "0xaa36a7"; // 11155111
+    // Thử chuyển sang Sepolia trước
+    try {
+      await anyWin.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: sepoliaHex }],
+      });
+    } catch (err: any) {
+      // Nếu Sepolia chưa có trong MM -> thêm rồi chuyển
+      if (err?.code === 4902) {
+        await anyWin.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: sepoliaHex,
+            chainName: "Sepolia",
+            nativeCurrency: { name: "SepoliaETH", symbol: "SEP", decimals: 18 },
+            rpcUrls: ["https://eth-sepolia.public.blastapi.io", "https://rpc.sepolia.org"],
+            blockExplorerUrls: ["https://sepolia.etherscan.io"],
+          }],
+        });
+        await anyWin.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: sepoliaHex }],
+        });
+      } else {
+        console.error("switch chain error:", err);
+        alert(`Please switch MetaMask to Sepolia (chainId ${EXPECT_CHAIN_ID}).`);
+        return;
+      }
+    }
+
+    // Đã ở Sepolia -> connect
     const provider = new BrowserProvider(anyWin.ethereum);
     await anyWin.ethereum.request({ method: "eth_requestAccounts" });
     const signer = await provider.getSigner();
     const net = await provider.getNetwork();
     setWallet({ address: await signer.getAddress(), chainId: Number(net.chainId) });
-    if (Number(net.chainId) !== EXPECT_CHAIN_ID) {
-      alert(`Please switch MetaMask to Sepolia (chainId ${EXPECT_CHAIN_ID}).`);
-    }
   }
 
   async function submitBid(e: React.FormEvent) {
     e.preventDefault();
     if (!wallet.address) return alert("Connect wallet first");
+
+    // kiểm tra số nguyên không âm
     if (!/^\d+$/.test(bid)) return alert("Bid must be a non-negative integer");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
+
+    // nếu đang ở chain khác -> gọi connect() để auto switch
+    const net = await provider.getNetwork();
+    if (Number(net.chainId) !== EXPECT_CHAIN_ID) {
+      await connect();
+    }
+
     const signer = await provider.getSigner();
 
     // 1) Khởi tạo FHE instance cho Sepolia
     const inst = await getFheInstance();
 
-    // 2) Tạo encrypted input & proof (giống test đã pass)
+    // 2) Tạo encrypted input & proof
     const buf = inst.createEncryptedInput(AUCTION_ADDRESS, await signer.getAddress());
     buf.add32(BigInt(bid));
     const enc = await buf.encrypt(); // => { handles: [bytes32,...], inputProof: bytes }
