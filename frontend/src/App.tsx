@@ -60,6 +60,7 @@ async function tryProviders<T>(
       return await call(browserP);
     } catch (e: any) {
       tried.push("BrowserProvider");
+      console.warn("BrowserProvider failed:", e?.code, e?.value, e?.message);
       // tiếp tục thử RPC khác
     }
   }
@@ -72,6 +73,8 @@ async function tryProviders<T>(
     } catch (e: any) {
       lastErr = e;
       tried.push(url);
+      // log chi tiết để dễ debug
+      console.warn("RPC failed:", url, e?.code, e?.value, e?.message);
       // Nếu lỗi là BAD_DATA với value 0x (node trả rỗng) → thử tiếp
       if (e?.code === "BAD_DATA" || e?.value === "0x") continue;
       // các lỗi khác cũng thử tiếp node khác
@@ -98,13 +101,19 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
       return st;
     });
   } catch (e: any) {
-    if (e?.code === "BAD_DATA" || e?.value === "0x") {
+    const msg = String(e?.message || e);
+    if (
+      e?.code === "BAD_DATA" ||
+      e?.value === "0x" ||
+      /bad data|invalid|execution reverted/i.test(msg)
+    ) {
       console.warn(
-        `Address ${addr} is not a compatible FHEAuction (getStatus missing).`
+        `Address ${addr} incompatible (likely getStatus missing):`,
+        msg
       );
       return null;
     }
-    console.error("safeReadStatus unexpected error:", e);
+    console.error("safeReadStatus unexpected error:", addr, e);
     return null;
   }
 }
@@ -164,20 +173,30 @@ export default function App() {
   useEffect(() => {
     (async () => {
       if (!addresses.length) return;
+      setLoadingList(true);
       try {
-        setLoadingList(true);
-        const entries = await Promise.all(
-          addresses.map(async (addr) => [addr, await safeReadStatus(addr)] as const)
+        // dùng allSettled để 1 địa chỉ fail không chặn cả danh sách
+        const results = await Promise.allSettled(
+          addresses.map((addr) => safeReadStatus(addr))
         );
         const map: Record<string, AuctionStatus | null> = {};
-        for (const [addr, st] of entries) map[addr] = st;
+        results.forEach((res, i) => {
+          const addr = addresses[i];
+          if (res.status === "fulfilled") {
+            map[addr] = res.value; // object hoặc null (incompatible)
+          } else {
+            console.error("load status fail:", addr, res.reason);
+            map[addr] = null; // đánh dấu incompatible → UI rõ ràng
+          }
+        });
         setListStatus(map);
       } catch (e) {
-        console.error("load list status", e);
+        console.error("load list status (outer):", e);
       } finally {
         setLoadingList(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addresses.join(",")]);
 
   // —— UI trạng thái 1 auction đang active ——
@@ -289,6 +308,9 @@ export default function App() {
     }
   }
 
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ended = detail ? Number(detail.endTime) <= nowSec : false;
+
   // ————— UI —————
   return (
     <div style={{ maxWidth: 980, margin: "24px auto", fontFamily: "Inter, system-ui" }}>
@@ -331,7 +353,11 @@ export default function App() {
                 }}
               >
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  {incompatible ? "(incompatible contract)" : st?.item || "(unknown item)"}
+                  {st === undefined
+                    ? "loading…"
+                    : incompatible
+                    ? "(incompatible contract)"
+                    : st?.item || "(unknown item)"}
                 </div>
                 <div style={{ fontSize: 12, opacity: 0.8 }}>
                   End:{" "}
@@ -446,8 +472,12 @@ export default function App() {
           <div style={{ marginTop: 12 }}>
             <button
               onClick={settleAndReveal}
-              disabled={!detail}
-              style={{ padding: "8px 14px", borderRadius: 8, opacity: !detail ? 0.5 : 1 }}
+              disabled={!detail || !ended}
+              style={{
+                padding: "8px 14px",
+                borderRadius: 8,
+                opacity: !detail || !ended ? 0.5 : 1,
+              }}
             >
               Settle & reveal
             </button>

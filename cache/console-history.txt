@@ -1,0 +1,33 @@
+artifacts/contracts/FHEAuction.sol/FHEAuction.json
+await c.getStatus();
+const c = await ethers.getContractAt("FHEAuction", "0x493cCee58Db9158cB3689a1c3a09E2726837aFfD");
+await c2.getStatus();
+await c1.getStatus();
+c1.interface.getFunction("getStatus").format("full");
+const c2 = await ethers.getContractAt("FHEAuction", addr2);
+const c1 = await ethers.getContractAt("FHEAuction", addr1);
+const addr2 = "0xee4743dF4789Af428421e56Aa9664bB3543244f7";
+const addr1 = "0x493cCee58Db9158cB3689a1c3a09E2726837aFfD";
+await c2.getStatus();
+await c1.getStatus();
+const c2 = await ethers.getContractAt(abi, "0xee4743dF4789Af428421e56Aa9664bB3543244f7");
+const c1 = await ethers.getContractAt(abi, "0x493cCee58Db9158cB3689a1c3a09E2726837aFfD");
+const abi = (require('./frontend/src/abi/FHEAuction.json')).abi;
+const a2 = await F.deploy("Rare NFT #2", 600n); await a2.waitForDeployment();
+const a1 = await F.deploy("Rare NFT #1", 600n); await a1.waitForDeployment(); (await a1.getAddress())
+const F = await ethers.getContractFactory("FHEAuction");
+}
+  console.log(a, "OK", st);
+  const st = await c.getStatus();   // nếu chạy được là đúng
+  const c = await ethers.getContractAt("FHEAuction", a);
+for (const a of addrs) {
+addrs;
+}
+  addrs.push(await c.getAddress());
+  await c.waitForDeployment();
+  const c = await F.deploy(name, period);
+for (const name of names) {
+const addrs = [];
+const names = ["Rare NFT #1","Rare NFT #2","Rare NFT #3","Rare NFT #4","Rare NFT #5"];
+const period = 600n; // 10 phút
+const F = await ethers.getContractFactory("FHEAuction");
