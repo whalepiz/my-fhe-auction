@@ -37,7 +37,11 @@ const RPCS = [
   "https://ethereum-sepolia.publicnode.com",
 ];
 
+// ÉP đọc qua RPC công cộng để tránh BAD_DATA từ BrowserProvider
+const USE_BROWSER_READ = false;
+
 async function getBrowserReadProvider(): Promise<BrowserProvider | null> {
+  if (!USE_BROWSER_READ) return null; // <- khóa đọc qua MetaMask
   const anyWin = window as any;
   if (!anyWin.ethereum) return null;
   try {
@@ -69,15 +73,12 @@ async function tryProviders<T>(
   for (const url of RPCS) {
     const p = new JsonRpcProvider(url);
     try {
-      return await call(p);
+      const out = await call(p);
+      return out;
     } catch (e: any) {
       lastErr = e;
       tried.push(url);
-      // log chi tiết để dễ debug
       console.warn("RPC failed:", url, e?.code, e?.value, e?.message);
-      // Nếu lỗi là BAD_DATA với value 0x (node trả rỗng) → thử tiếp
-      if (e?.code === "BAD_DATA" || e?.value === "0x") continue;
-      // các lỗi khác cũng thử tiếp node khác
       continue;
     }
   }
@@ -107,10 +108,7 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
       e?.value === "0x" ||
       /bad data|invalid|execution reverted/i.test(msg)
     ) {
-      console.warn(
-        `Address ${addr} incompatible (likely getStatus missing):`,
-        msg
-      );
+      console.warn(`Address ${addr} incompatible (likely getStatus missing):`, msg);
       return null;
     }
     console.error("safeReadStatus unexpected error:", addr, e);
@@ -175,7 +173,6 @@ export default function App() {
       if (!addresses.length) return;
       setLoadingList(true);
       try {
-        // dùng allSettled để 1 địa chỉ fail không chặn cả danh sách
         const results = await Promise.allSettled(
           addresses.map((addr) => safeReadStatus(addr))
         );
@@ -292,9 +289,7 @@ export default function App() {
         const me = await signer.getAddress();
         tx = await c.settle([me]);
       } else {
-        throw new Error(
-          `Unsupported settle signature: ${(frag as any).format("full")}`
-        );
+        throw new Error(`Unsupported settle signature: ${(frag as any).format("full")}`);
       }
       await tx.wait();
 
