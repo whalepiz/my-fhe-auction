@@ -34,6 +34,20 @@ async function readStatus(addr: string, provider: any): Promise<AuctionStatus> {
   return st;
 }
 
+// Luôn có provider đọc-only về Sepolia nếu MetaMask không ở đúng chain
+async function getReadOnlyProvider() {
+  const anyWin = window as any;
+  if (anyWin.ethereum) {
+    const p = new BrowserProvider(anyWin.ethereum);
+    try {
+      const net = await p.getNetwork();
+      if (Number(net.chainId) === CHAIN_ID) return p; // MM đang ở Sepolia -> dùng luôn
+    } catch {}
+  }
+  const { JsonRpcProvider } = await import("ethers");
+  return new JsonRpcProvider("https://rpc.sepolia.org");
+}
+
 export default function App() {
   // —— Wallet ——
   const [wallet, setWallet] = useState<Wallet>({ address: null, chainId: null });
@@ -91,10 +105,7 @@ export default function App() {
       if (!addresses.length) return;
       try {
         setLoadingList(true);
-        const anyWin = window as any;
-        const provider = anyWin.ethereum
-          ? new BrowserProvider(anyWin.ethereum)
-          : new (await import("ethers")).JsonRpcProvider("https://rpc.sepolia.org"); // readonly
+        const provider = await getReadOnlyProvider();
         const entries = await Promise.all(
           addresses.map(async (addr) => [addr, await readStatus(addr, provider)] as const)
         );
@@ -117,10 +128,7 @@ export default function App() {
   async function refreshDetail() {
     if (!active) return;
     try {
-      const anyWin = window as any;
-      const provider = anyWin.ethereum
-        ? new BrowserProvider(anyWin.ethereum)
-        : new (await import("ethers")).JsonRpcProvider("https://rpc.sepolia.org");
+      const provider = await getReadOnlyProvider();
       const st = await readStatus(active, provider);
       setDetail(st);
       setListStatus((old) => ({ ...old, [active]: st }));
