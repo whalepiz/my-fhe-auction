@@ -31,11 +31,12 @@ function fmtTs(ts?: bigint) {
 
 // Nhiều RPC để fallback khi 1 endpoint trả 0x (BAD_DATA)
 const RPCS = [
-  "https://rpc.sepolia.org",
   "https://eth-sepolia.public.blastapi.io",
   "https://endpoints.omniatech.io/v1/eth/sepolia/public",
   "https://ethereum-sepolia.publicnode.com",
+  "https://rpc2.sepolia.org"  // fallback nếu có
 ];
+
 
 // ÉP đọc qua RPC công cộng để tránh BAD_DATA từ BrowserProvider
 const USE_BROWSER_READ = false;
