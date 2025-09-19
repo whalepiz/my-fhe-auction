@@ -9,7 +9,7 @@ import {
 } from "ethers";
 import { getFheInstance } from "./lib/fhe";
 import auctionAbiJson from "./abi/FHEAuction.json";
-import { AUCTIONS, CHAIN_ID, AUCTION_META } from "./config";
+import { AUCTIONS as ENV_AUCTIONS, CHAIN_ID, AUCTION_META } from "./config";
 
 const auctionAbi = (auctionAbiJson as any).abi;
 const auctionBytecode: string | undefined = (auctionAbiJson as any)?.bytecode;
@@ -44,6 +44,12 @@ function fmtRemain(s: number) {
   if (h) return `${h}h ${m}m`;
   if (m) return `${m}m ${sec}s`;
   return `${sec}s`;
+}
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+function isAddress(s: string) {
+  return /^0x[a-fA-F0-9]{40}$/.test(s);
 }
 
 /* RPCs có CORS mở */
@@ -125,27 +131,61 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
   }
 }
 
-/* ====== CHỜ FHE KEY SẴN SÀNG trước khi mã hoá/bid (fix revert) ====== */
-async function waitFheReady(addr: string, setBusy?: (s: string|null)=>void) {
+/* ====== PERSIST danh sách auction trong localStorage ====== */
+const LS_KEY = "fhe_auctions";
+function loadLocalAddrs(): string[] {
   try {
-    const inst = await getFheInstance();
-    if ((inst as any)?.waitForPublicKey) {
-      setBusy?.("Đang chuẩn bị khoá FHE…");
-      // một số SDK có tuỳ chọn timeoutMs
-      await (inst as any).waitForPublicKey(addr, { timeoutMs: 120000 }).catch(() => {});
-    } else if ((inst as any)?.getPublicKey) {
-      setBusy?.("Đang lấy khoá công khai FHE…");
-      await (inst as any).getPublicKey(addr).catch(() => {});
-    } else {
-      // fallback: đợi 8s (gateway thường cần vài giây sau deploy)
-      setBusy?.("Đang khởi tạo FHE…");
-      await new Promise((r) => setTimeout(r, 8000));
-    }
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((x: any) => typeof x === "string" && isAddress(x));
   } catch {
-    // im lặng — encrypt sẽ tự báo nếu vẫn chưa sẵn sàng
-  } finally {
-    setBusy?.(null);
+    return [];
   }
+}
+function saveLocalAddrs(addrs: string[]) {
+  const uniq = Array.from(new Set(addrs.filter(isAddress)));
+  localStorage.setItem(LS_KEY, JSON.stringify(uniq));
+}
+function initialAddrList(): string[] {
+  const env = (ENV_AUCTIONS || []).filter(isAddress);
+  const ls = loadLocalAddrs();
+  return Array.from(new Set([...env, ...ls]));
+}
+
+/* ====== CHỜ/RETRY FHE key & encrypt (fix revert ngay sau deploy) ====== */
+async function encryptBidWithRetry(
+  contractAddr: string,
+  signerAddr: string,
+  value: bigint,
+  setBusy?: (s: string | null) => void
+) {
+  const inst = await getFheInstance();
+
+  // Thử tối đa 6 lần, backoff tăng dần
+  for (let i = 1; i <= 6; i++) {
+    try {
+      setBusy?.(`Chuẩn bị FHE key… (lần ${i}/6)`);
+      // một số SDK có waitForPublicKey/getPublicKey, nhưng để generic ta thử encrypt luôn
+      const buf = inst.createEncryptedInput(contractAddr, signerAddr);
+      buf.add32(value);
+      setBusy?.("Đang mã hoá bid…");
+      const enc = await buf.encrypt();
+      return enc;
+    } catch (e: any) {
+      const msg = String(e?.message || "");
+      const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch/i.test(msg);
+      if (!retriable || i === 6) {
+        throw e;
+      }
+      // backoff: 2s, 3s, 4s, 6s, 8s
+      const waits = [2000, 3000, 4000, 6000, 8000];
+      await sleep(waits[i - 1] ?? 8000);
+      continue;
+    }
+  }
+  throw new Error("FHE key chưa sẵn sàng.");
 }
 
 /* ======================== UI bits ======================== */
@@ -311,8 +351,8 @@ export default function App() {
     setWallet({ address: await signer.getAddress(), chainId: Number(net.chainId) });
   }
 
-  /* Danh sách auction (có thể thêm mới từ UI) */
-  const initialAddresses = useMemo(() => (AUCTIONS.length ? AUCTIONS : []), []);
+  /* Danh sách auction (persist + có thể thêm mới từ UI) */
+  const initialAddresses = useMemo(initialAddrList, []);
   const [addrList, setAddrList] = useState<string[]>(initialAddresses);
   const [active, setActive] = useState<string>(initialAddresses[0] ?? "");
   const [listStatus, setListStatus] = useState<Record<string, AuctionStatus | null>>({});
@@ -324,6 +364,11 @@ export default function App() {
   const [newItem, setNewItem] = useState("");
   const [newMinutes, setNewMinutes] = useState<number>(10);
   const [creating, setCreating] = useState(false);
+
+  // Khi danh sách thay đổi -> lưu xuống localStorage để F5 vẫn còn
+  useEffect(() => {
+    saveLocalAddrs(addrList);
+  }, [addrList]);
 
   useEffect(() => {
     (async () => {
@@ -385,18 +430,13 @@ export default function App() {
     const provider = new BrowserProvider(anyWin.ethereum);
 
     try {
-      // 🔑 chờ khoá FHE sẵn sàng cho contract (fix revert lúc mới deploy)
-      await waitFheReady(active, setBusy);
-
-      setBusy("Đang mã hoá bid…");
       const net = await provider.getNetwork();
       if (Number(net.chainId) !== CHAIN_ID) await connect();
       const signer = await provider.getSigner();
+      const me = await signer.getAddress();
 
-      const inst = await getFheInstance();
-      const buf = inst.createEncryptedInput(active, await signer.getAddress());
-      buf.add32(BigInt(bid));
-      const enc = await buf.encrypt();
+      // 🔑 Encrypt có retry/backoff để chờ public key
+      const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
       setBusy("Gửi giao dịch…");
       const contract = new Contract(active, auctionAbi, signer);
@@ -413,11 +453,9 @@ export default function App() {
         err?.info?.error?.message ||
         err?.message ||
         "Unknown error";
-      // gợi ý người dùng nếu vừa deploy xong
-      const hint =
-        /execution reverted/i.test(msg)
-          ? " (Nếu vừa tạo auction, hãy đợi 10–30s để FHE key sẵn sàng rồi thử lại.)"
-          : "";
+      const hint = /execution reverted/i.test(msg)
+        ? " (Nếu vừa tạo auction, hãy đợi thêm 10–30s để FHE key sẵn sàng rồi thử lại.)"
+        : "";
       setToast("Bid thất bại: " + msg + hint);
     } finally {
       setBusy(null);
@@ -490,12 +528,14 @@ export default function App() {
       // @ts-ignore ethers v6
       const newAddr: string = c.target;
 
-      setToast(`Deploy thành công: ${newAddr} — đang chuẩn bị FHE key…`);
-      setAddrList((old) => [newAddr, ...old]);
-      setActive(newAddr);
+      setToast(`Deploy thành công: ${newAddr}`);
+      const next = Array.from(new Set([newAddr, ...addrList]));
+      setAddrList(next);
+      setActive(newAddr); // set active ngay
+      // Lưu LS sẽ tự động do useEffect ở trên
 
-      // 👇 đợi khoá FHE sẵn sàng ngay sau deploy để người dùng bid không bị revert
-      await waitFheReady(newAddr);
+      // Sau deploy, public key có thể cần vài giây để sẵn sàng
+      // (người dùng bid ngay có thể gặp retry encrypt ở submit)
       await refreshDetail();
     } catch (err: any) {
       console.error("createAuction error:", err);
@@ -759,8 +799,8 @@ export default function App() {
             </button>
           </div>
           <div style={{ fontSize: 12, opacity: 0.7 }}>
-            Lưu ý: yêu cầu <code>frontend/src/abi/FHEAuction.json</code> là **artifact Hardhat** (có <code>bytecode</code>)
-            để deploy từ UI; và sau khi deploy nên đợi vài giây để FHE key sẵn sàng.
+            Yêu cầu file <code>frontend/src/abi/FHEAuction.json</code> là artifact Hardhat (có <code>bytecode</code>).
+            Sau khi deploy, FHE key có thể cần vài giây để sẵn sàng; khi bid, app sẽ tự retry.
           </div>
         </div>
       </Modal>
