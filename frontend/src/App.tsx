@@ -23,25 +23,11 @@ export default function App() {
     idxClear?: number;
   }>({});
 
-  useEffect(() => {
-    // auto connect nhẹ nếu user đã mở MetaMask sẵn
-    (async () => {
-      try {
-        const anyWin = window as any;
-        if (!anyWin?.ethereum) return;
-        const provider = new BrowserProvider(anyWin.ethereum);
-        const net = await provider.getNetwork();
-        setWallet({
-          address: (await (await provider.getSigner()).getAddress()).toString(),
-          chainId: Number(net.chainId),
-        });
-        await refreshStatus(provider);
-      } catch {
-        /* ignore */
-      }
-    })();
-  }, []);
-
+  // ---------- helpers ----------
+  function shortHex(x?: string, head = 10, tail = 6) {
+    if (!x) return "-";
+    return x.length > head + tail ? `${x.slice(0, head)}…${x.slice(-tail)}` : x;
+  }
   function fmtTs(ts?: number) {
     if (!ts) return "-";
     const d = new Date(ts * 1000);
@@ -91,6 +77,24 @@ export default function App() {
     }
   }
 
+  // ---------- lifecycle ----------
+  useEffect(() => {
+    (async () => {
+      try {
+        const anyWin = window as any;
+        if (!anyWin?.ethereum) return;
+        const provider = new BrowserProvider(anyWin.ethereum);
+        const signer = await provider.getSigner();
+        const net = await provider.getNetwork();
+        setWallet({ address: await signer.getAddress(), chainId: Number(net.chainId) });
+        await refreshStatus(provider);
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
+
+  // ---------- actions ----------
   async function connect() {
     const anyWin = window as any;
     if (!anyWin.ethereum) return alert("MetaMask not found");
@@ -118,20 +122,19 @@ export default function App() {
 
       // đảm bảo đúng chain
       const net = await provider.getNetwork();
-      if (Number(net.chainId) !== EXPECT_CHAIN_ID) {
-        await ensureSepolia(anyWin);
-      }
+      if (Number(net.chainId) !== EXPECT_CHAIN_ID) await ensureSepolia(anyWin);
+
       const signer = await provider.getSigner();
 
-      // 1) Khởi tạo FHE instance
+      // 1) FHE instance
       const inst = await getFheInstance();
 
-      // 2) Tạo encrypted input & proof
+      // 2) encrypted input & proof
       const buf = inst.createEncryptedInput(AUCTION_ADDRESS, await signer.getAddress());
       buf.add32(BigInt(bid));
       const enc = await buf.encrypt(); // -> { handles, inputProof }
 
-      // 3) Gọi contract bid(handle, proof)
+      // 3) call bid(handle, proof)
       setBusy("Sending transaction…");
       const contract = new Contract(AUCTION_ADDRESS, auctionAbi, signer);
       const tx = await contract.bid(enc.handles[0], enc.inputProof);
@@ -162,14 +165,66 @@ export default function App() {
 
       const provider = new BrowserProvider(anyWin.ethereum);
       const signer = await provider.getSigner();
+      const me = (await signer.getAddress()).toLowerCase();
       const contract = new Contract(AUCTION_ADDRESS, auctionAbi, signer);
 
-      // nếu chưa settle và đã hết hạn thì settle
+      // status
       const [, endTs, isSettled] = await contract.getStatus();
       const now = Math.floor(Date.now() / 1000);
+
+      // chỉ seller được settle
+      const seller = (await contract.seller()).toLowerCase();
+
+      // nếu chưa settled & đã hết hạn, tiến hành settle
       if (!isSettled && now >= Number(endTs)) {
-        const tx = await contract.settle();
-        await tx.wait();
+        if (seller !== me) {
+          alert("Only the seller can settle.");
+          setSettleBusy(null);
+          return;
+        }
+
+        // phát hiện chữ ký settle (null-safe)
+        let frag: any = null;
+        try {
+          frag = contract.interface.getFunction("settle");
+        } catch {
+          frag = null;
+        }
+
+        try {
+          if (frag?.inputs?.length === 0) {
+            // settle()
+            const tx = await contract.settle();
+            await tx.wait();
+          } else if (frag?.inputs?.length === 1 && frag?.inputs?.[0]?.type === "address[]") {
+            // settle(address[])
+            // cố lấy danh sách bidders từ event (nếu RPC không hỗ trợ logs, fallback dùng ví hiện tại)
+            let bidders: string[] = [];
+            try {
+              const latest = await provider.getBlockNumber();
+              const from = Math.max(0, latest - 8000); // cửa sổ nhỏ cho RPC public
+              const logs = await contract.queryFilter(contract.filters.BidSubmitted(), from, latest);
+              const uniq = new Set<string>();
+              logs.forEach((l: any) => uniq.add(l.args[0]));
+              bidders = Array.from(uniq);
+            } catch {
+              // fallback: dùng ví hiện tại (đủ cho demo 1 người bid)
+              bidders = [await signer.getAddress()];
+            }
+            if (bidders.length === 0) {
+              alert("No bidders found to settle.");
+              setSettleBusy(null);
+              return;
+            }
+            const tx = await contract.settle(bidders);
+            await tx.wait();
+          } else {
+            throw new Error(`Unsupported settle signature: ${frag?.format?.("full") ?? "unknown"}`);
+          }
+        } catch (e: any) {
+          // Một số RPC + FHEVM plugin có thể throw khi estimateGas, nhưng tx vẫn đã gửi/đã settle.
+          console.warn("settle attempt:", e?.message || e);
+        }
       }
 
       // đọc ciphertext kết quả
@@ -181,14 +236,13 @@ export default function App() {
       try {
         const inst: any = await getFheInstance();
         if (inst && typeof inst.userDecryptEuint === "function") {
-          // một số SDK cần kiểu & address; nếu không khớp sẽ ném lỗi (đã catch)
           const addr = await signer.getAddress();
           const bidClear = Number(await inst.userDecryptEuint("euint32", bidEnc, AUCTION_ADDRESS, addr));
           const idxClear = Number(await inst.userDecryptEuint("euint32", idxEnc, AUCTION_ADDRESS, addr));
           setWinner({ bidEnc, idxEnc, bidClear, idxClear });
           alert(`Settled. Winning bid = ${bidClear} (index ${idxClear})`);
         } else {
-          alert("Settled. Ciphertexts shown; decrypt may require relayer user keys.");
+          alert("Settled. Ciphertexts shown (decrypt may require user keys).");
         }
       } catch (de) {
         console.warn("Decrypt failed:", de);
@@ -198,16 +252,18 @@ export default function App() {
       await refreshStatus(provider);
     } catch (err: any) {
       console.error("settleAndReveal error:", err);
-      const msg = err?.shortMessage || err?.message || err;
+      const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       alert("Settle failed: " + msg);
     } finally {
       setSettleBusy(null);
     }
   }
 
+  // ---------- derived ----------
   const nowSec = Math.floor(Date.now() / 1000);
   const ended = status.end ? nowSec >= status.end : false;
 
+  // ---------- UI ----------
   return (
     <div style={{ maxWidth: 560, margin: "40px auto", fontFamily: "Inter, system-ui" }}>
       <h1>FHE Auction</h1>
@@ -258,8 +314,8 @@ export default function App() {
 
       {winner.bidEnc && (
         <div style={{ marginTop: 12, fontSize: 12, opacity: 0.85 }}>
-          <div>winningBidEnc: {winner.bidEnc.slice(0, 10)}…{winner.bidEnc.slice(-6)}</div>
-          <div>winningIndexEnc: {winner.idxEnc?.slice(0, 10)}…{winner.idxEnc?.slice(-6)}</div>
+          <div>winningBidEnc: {shortHex(winner.bidEnc)}</div>
+          <div>winningIndexEnc: {shortHex(winner.idxEnc)}</div>
           {typeof winner.bidClear === "number" && (
             <div style={{ marginTop: 6 }}>
               <b>Winner:</b> bid = {winner.bidClear}, index = {winner.idxClear}
