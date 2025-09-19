@@ -49,9 +49,7 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 function nowMs() { return Date.now(); }
-function isAddress(s: string) {
-  return /^0x[a-fA-F0-9]{40}$/.test(s);
-}
+function isAddress(s: string) { return /^0x[a-fA-F0-9]{40}$/.test(s); }
 
 /* RPCs có CORS mở */
 const RPCS = [
@@ -61,7 +59,6 @@ const RPCS = [
   "https://rpc2.sepolia.org",
 ];
 
-/* Đọc trạng thái CHỈ qua RPC công để tránh BAD_DATA từ BrowserProvider */
 const USE_BROWSER_READ = false;
 
 async function getBrowserReadProvider(): Promise<BrowserProvider | null> {
@@ -164,7 +161,6 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
       await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 120000 });
       return;
     }
-    // SDK cũ: poll getPublicKey
     for (let i = 1; i <= 8; i++) {
       try {
         setBusy?.(`Fetching FHE key… (try ${i}/8)`);
@@ -181,8 +177,6 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
     setBusy?.(null);
   }
 }
-
-// Kiểm tra key sẵn sàng → để bật/tắt nút tự động
 async function isFheReady(contractAddr: string): Promise<boolean> {
   try {
     const inst = await getFheInstance();
@@ -199,7 +193,6 @@ async function isFheReady(contractAddr: string): Promise<boolean> {
     return false;
   }
 }
-
 async function encryptBidWithRetry(
   contractAddr: string,
   signerAddr: string,
@@ -218,7 +211,7 @@ async function encryptBidWithRetry(
       const msg = String(e?.message || "");
       const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
       if (!retriable || i === 10) throw e;
-      await sleep(1000 * i); // 1s..10s
+      await sleep(1000 * i);
     }
   }
   throw new Error("FHE key chưa sẵn sàng.");
@@ -246,14 +239,8 @@ function decodeRevert(err: any): string | null {
   }
 }
 
-/* ======================== UI bits (dark theme) ======================== */
-function Badge({
-  color,
-  children,
-}: {
-  color: "green" | "gray" | "orange" | "blue";
-  children: any;
-}) {
+/* ======================== UI bits ======================== */
+function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: any; }) {
   const bg =
     color === "green" ? "#103e2a" :
     color === "orange" ? "#3f2b00" :
@@ -264,7 +251,6 @@ function Badge({
     color === "blue" ? "#75a7ff" : "#cbd5e1";
   return <span className="badge" style={{ background: bg, color: tx }}>{children}</span>;
 }
-
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null as any;
   return (
@@ -277,18 +263,7 @@ function Toast({ text, onClose }: { text: string; onClose: () => void }) {
     </div>
   );
 }
-
-function Modal({
-  open,
-  children,
-  onClose,
-  title,
-}: {
-  open: boolean;
-  children: any;
-  onClose: () => void;
-  title: string;
-}) {
+function Modal({ open, children, onClose, title }: { open: boolean; children: any; onClose: () => void; title: string; }) {
   if (!open) return null as any;
   return (
     <div className="modal__backdrop" onClick={onClose}>
@@ -441,76 +416,7 @@ export default function App() {
     fheReady && (fheReadySince !== null ? nowMs() - fheReadySince >= 20_000 : false);
 
   /* Actions */
-async function submitBid(e: React.FormEvent) {
-  e.preventDefault();
-  if (!wallet.address) return setToast("Hãy kết nối ví trước.");
-  if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
-  if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
-  if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
-  if (!fheWarmed) return setToast("FHE key chưa sẵn sàng/đang làm ấm, đợi vài giây rồi thử lại.");
-
-  const anyWin = window as any;
-  const provider = new BrowserProvider(anyWin.ethereum);
-
-  try {
-    const net = await provider.getNetwork();
-    if (Number(net.chainId) !== CHAIN_ID) await connect();
-    const signer = await provider.getSigner();
-    const me = await signer.getAddress();
-
-    // 1) Đảm bảo public key sẵn
-    await waitPublicKey(active, setBusy);
-
-    // 2) Encrypt + retry
-    const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
-
-    // 3) LẤY METHOD CHUẨN ethers v6
-    setBusy("Sending transaction…");
-    const contract = new Contract(active, auctionAbi, signer);
-    const bidMethod = contract.getFunction("bid"); // <-- KHÔNG dùng contract.bid trực tiếp
-
-    // Gửi tx (có gasLimit); nếu estimateGas fail thì vẫn force send
-    let txHash = "";
-    try {
-      let est: any = null;
-      try {
-        est = await bidMethod.estimateGas(enc.handles[0], enc.inputProof);
-      } catch {}
-      const tx = await bidMethod(enc.handles[0], enc.inputProof, {
-        gasLimit: est ?? 1_200_000,
-      });
-      txHash = (tx as any)?.hash || "";
-      await tx.wait();
-    } catch {
-      const pop = await bidMethod.populateTransaction(enc.handles[0], enc.inputProof);
-      const tx2 = await signer.sendTransaction({ ...pop, gasLimit: 1_200_000 });
-      txHash = (tx2 as any)?.hash || txHash;
-      await provider.waitForTransaction(tx2.hash);
-    }
-
-    setToast(`Đã gửi bid (encrypted) = ${bid}`);
-    setBid("");
-    await refreshDetail();
-  } catch (err: any) {
-    console.error("submitBid error:", err);
-    const decoded = decodeRevert(err);
-    const base =
-      err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
-    const reason = decoded ? ` | Revert: ${decoded}` : "";
-    const txHash =
-      err?.transactionHash ||
-      err?.receipt?.transactionHash ||
-      err?.hash || "";
-    const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
-    const hint = /execution reverted|InvalidInput|Cipher|Proof|PublicKey|Invalid|input/i.test(base + reason)
-      ? " (Có thể FHE key/proof vẫn chưa đồng bộ hoàn toàn. Đợi thêm 20–60s rồi thử lại.)"
-      : "";
-    setToast("Bid thất bại: " + base + reason + hint + link);
-  } finally {
-    setBusy(null);
-  }
-}
-  {
+  async function submitBid(e: React.FormEvent) {
     e.preventDefault();
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
@@ -533,28 +439,20 @@ async function submitBid(e: React.FormEvent) {
       // 2) Encrypt + retry
       const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
-      // 3) Gửi tx với gasLimit rộng để tránh ước lượng sai
+      // 3) Encode calldata & sendTransaction (không đụng đến contract.bid -> tránh TS2339)
       setBusy("Sending transaction…");
-      const contract = new Contract(active, auctionAbi, signer);
+      const iface = new Interface(auctionAbi);
+      const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      let txHash = "";
+      // Ước lượng gas (thử), nếu fail thì dùng mặc định
+      let gasLimit = 1_200_000n;
       try {
-        const est = await contract.estimateGas
-          .bid(enc.handles[0], enc.inputProof)
-          .catch(() => null);
-        const tx = await contract.bid(
-          enc.handles[0],
-          enc.inputProof,
-          { gasLimit: est ?? 1_200_000 }
-        );
-        txHash = (tx as any)?.hash || "";
-        await tx.wait();
-      } catch {
-        const pop = await contract.populateTransaction.bid(enc.handles[0], enc.inputProof);
-        const tx2 = await signer.sendTransaction({ ...pop, gasLimit: 1_200_000 });
-        txHash = (tx2 as any)?.hash || txHash;
-        await provider.waitForTransaction(tx2.hash);
-      }
+        const est = await signer.estimateGas({ to: active, data });
+        if (est && est > 0n) gasLimit = est + (est / 5n); // +20%
+      } catch {}
+
+      const tx = await signer.sendTransaction({ to: active, data, gasLimit });
+      await tx.wait();
 
       setToast(`Đã gửi bid (encrypted) = ${bid}`);
       setBid("");
