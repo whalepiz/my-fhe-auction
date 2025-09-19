@@ -34,7 +34,7 @@ const RPCS = [
   "https://eth-sepolia.public.blastapi.io",
   "https://endpoints.omniatech.io/v1/eth/sepolia/public",
   "https://ethereum-sepolia.publicnode.com",
-  "https://rpc2.sepolia.org"  // fallback nếu có
+  "https://rpc2.sepolia.org",
 ];
 
 
