@@ -441,7 +441,76 @@ export default function App() {
     fheReady && (fheReadySince !== null ? nowMs() - fheReadySince >= 20_000 : false);
 
   /* Actions */
-  async function submitBid(e: React.FormEvent) {
+async function submitBid(e: React.FormEvent) {
+  e.preventDefault();
+  if (!wallet.address) return setToast("Hãy kết nối ví trước.");
+  if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
+  if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
+  if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
+  if (!fheWarmed) return setToast("FHE key chưa sẵn sàng/đang làm ấm, đợi vài giây rồi thử lại.");
+
+  const anyWin = window as any;
+  const provider = new BrowserProvider(anyWin.ethereum);
+
+  try {
+    const net = await provider.getNetwork();
+    if (Number(net.chainId) !== CHAIN_ID) await connect();
+    const signer = await provider.getSigner();
+    const me = await signer.getAddress();
+
+    // 1) Đảm bảo public key sẵn
+    await waitPublicKey(active, setBusy);
+
+    // 2) Encrypt + retry
+    const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
+
+    // 3) LẤY METHOD CHUẨN ethers v6
+    setBusy("Sending transaction…");
+    const contract = new Contract(active, auctionAbi, signer);
+    const bidMethod = contract.getFunction("bid"); // <-- KHÔNG dùng contract.bid trực tiếp
+
+    // Gửi tx (có gasLimit); nếu estimateGas fail thì vẫn force send
+    let txHash = "";
+    try {
+      let est: any = null;
+      try {
+        est = await bidMethod.estimateGas(enc.handles[0], enc.inputProof);
+      } catch {}
+      const tx = await bidMethod(enc.handles[0], enc.inputProof, {
+        gasLimit: est ?? 1_200_000,
+      });
+      txHash = (tx as any)?.hash || "";
+      await tx.wait();
+    } catch {
+      const pop = await bidMethod.populateTransaction(enc.handles[0], enc.inputProof);
+      const tx2 = await signer.sendTransaction({ ...pop, gasLimit: 1_200_000 });
+      txHash = (tx2 as any)?.hash || txHash;
+      await provider.waitForTransaction(tx2.hash);
+    }
+
+    setToast(`Đã gửi bid (encrypted) = ${bid}`);
+    setBid("");
+    await refreshDetail();
+  } catch (err: any) {
+    console.error("submitBid error:", err);
+    const decoded = decodeRevert(err);
+    const base =
+      err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
+    const reason = decoded ? ` | Revert: ${decoded}` : "";
+    const txHash =
+      err?.transactionHash ||
+      err?.receipt?.transactionHash ||
+      err?.hash || "";
+    const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
+    const hint = /execution reverted|InvalidInput|Cipher|Proof|PublicKey|Invalid|input/i.test(base + reason)
+      ? " (Có thể FHE key/proof vẫn chưa đồng bộ hoàn toàn. Đợi thêm 20–60s rồi thử lại.)"
+      : "";
+    setToast("Bid thất bại: " + base + reason + hint + link);
+  } finally {
+    setBusy(null);
+  }
+}
+  {
     e.preventDefault();
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
