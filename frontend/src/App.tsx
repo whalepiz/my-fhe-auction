@@ -9,6 +9,29 @@ const auctionAbi = (auctionAbiJson as any).abi;
 
 type Wallet = { address: string | null; chainId: number | null };
 
+// ---- localStorage helpers for bidders ----
+const BIDDERS_KEY = (addr: string) => `bidders:${addr.toLowerCase()}`;
+function loadBidders(): string[] {
+  try {
+    const raw = localStorage.getItem(BIDDERS_KEY(AUCTION_ADDRESS));
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+function saveBidders(bidders: string[]) {
+  try {
+    localStorage.setItem(BIDDERS_KEY(AUCTION_ADDRESS), JSON.stringify(bidders));
+  } catch {}
+}
+function addBidderOnce(list: string[], addr: string) {
+  const set = new Set(list.map((x) => x.toLowerCase()));
+  if (!set.has(addr.toLowerCase())) list.push(addr);
+  return list;
+}
+
 export default function App() {
   const [wallet, setWallet] = useState<Wallet>({ address: null, chainId: null });
   const [bid, setBid] = useState("");
@@ -16,12 +39,8 @@ export default function App() {
   const [settleBusy, setSettleBusy] = useState<string | null>(null);
 
   const [status, setStatus] = useState<{ item?: string; end?: number; settled?: boolean }>({});
-  const [winner, setWinner] = useState<{
-    bidEnc?: string;
-    idxEnc?: string;
-    bidClear?: number;
-    idxClear?: number;
-  }>({});
+  const [winner, setWinner] = useState<{ bidEnc?: string; idxEnc?: string; bidClear?: number; idxClear?: number }>({});
+  const [bidders, setBidders] = useState<string[]>([]);
 
   // ---------- helpers ----------
   function shortHex(x?: string, head = 10, tail = 6) {
@@ -33,38 +52,28 @@ export default function App() {
     const d = new Date(ts * 1000);
     return `${d.toLocaleString()} (${ts})`;
   }
-
   async function ensureSepolia(anyWin: any) {
     const sepoliaHex = "0xaa36a7"; // 11155111
     try {
-      await anyWin.ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: sepoliaHex }],
-      });
+      await anyWin.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: sepoliaHex }] });
     } catch (err: any) {
       if (err?.code === 4902) {
         await anyWin.ethereum.request({
           method: "wallet_addEthereumChain",
-          params: [
-            {
-              chainId: sepoliaHex,
-              chainName: "Sepolia",
-              nativeCurrency: { name: "SepoliaETH", symbol: "SEP", decimals: 18 },
-              rpcUrls: ["https://rpc.sepolia.org", "https://eth-sepolia.public.blastapi.io"],
-              blockExplorerUrls: ["https://sepolia.etherscan.io"],
-            },
-          ],
+          params: [{
+            chainId: sepoliaHex,
+            chainName: "Sepolia",
+            nativeCurrency: { name: "SepoliaETH", symbol: "SEP", decimals: 18 },
+            rpcUrls: ["https://rpc.sepolia.org", "https://eth-sepolia.public.blastapi.io"],
+            blockExplorerUrls: ["https://sepolia.etherscan.io"],
+          }],
         });
-        await anyWin.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: sepoliaHex }],
-        });
+        await anyWin.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: sepoliaHex }] });
       } else {
         throw err;
       }
     }
   }
-
   async function refreshStatus(provider?: BrowserProvider) {
     try {
       const p = provider ?? new BrowserProvider((window as any).ethereum);
@@ -79,6 +88,7 @@ export default function App() {
 
   // ---------- lifecycle ----------
   useEffect(() => {
+    setBidders(loadBidders());
     (async () => {
       try {
         const anyWin = window as any;
@@ -88,9 +98,7 @@ export default function App() {
         const net = await provider.getNetwork();
         setWallet({ address: await signer.getAddress(), chainId: Number(net.chainId) });
         await refreshStatus(provider);
-      } catch {
-        /* ignore */
-      }
+      } catch {/* ignore */}
     })();
   }, []);
 
@@ -120,7 +128,7 @@ export default function App() {
     try {
       setBusy("Encrypting bid…");
 
-      // đảm bảo đúng chain
+      // ensure chain
       const net = await provider.getNetwork();
       if (Number(net.chainId) !== EXPECT_CHAIN_ID) await ensureSepolia(anyWin);
 
@@ -132,24 +140,26 @@ export default function App() {
       // 2) encrypted input & proof
       const buf = inst.createEncryptedInput(AUCTION_ADDRESS, await signer.getAddress());
       buf.add32(BigInt(bid));
-      const enc = await buf.encrypt(); // -> { handles, inputProof }
+      const enc = await buf.encrypt();
 
-      // 3) call bid(handle, proof)
+      // 3) contract call
       setBusy("Sending transaction…");
       const contract = new Contract(AUCTION_ADDRESS, auctionAbi, signer);
       const tx = await contract.bid(enc.handles[0], enc.inputProof);
       await tx.wait();
+
+      // record bidder locally
+      const addr = await signer.getAddress();
+      const next = addBidderOnce([...bidders], addr);
+      setBidders(next);
+      saveBidders(next);
 
       alert(`Submitted encrypted bid = ${bid}`);
       setBid("");
       await refreshStatus(provider);
     } catch (err: any) {
       console.error("submitBid error:", err);
-      const msg =
-        err?.shortMessage ||
-        err?.info?.error?.message ||
-        err?.message ||
-        "Unknown error. Open console for details.";
+      const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error. Open console.";
       alert("Bid failed: " + msg);
     } finally {
       setBusy(null);
@@ -168,14 +178,10 @@ export default function App() {
       const me = (await signer.getAddress()).toLowerCase();
       const contract = new Contract(AUCTION_ADDRESS, auctionAbi, signer);
 
-      // status
       const [, endTs, isSettled] = await contract.getStatus();
       const now = Math.floor(Date.now() / 1000);
-
-      // chỉ seller được settle
       const seller = (await contract.seller()).toLowerCase();
 
-      // nếu chưa settled & đã hết hạn, tiến hành settle
       if (!isSettled && now >= Number(endTs)) {
         if (seller !== me) {
           alert("Only the seller can settle.");
@@ -183,59 +189,47 @@ export default function App() {
           return;
         }
 
-        // phát hiện chữ ký settle (null-safe)
         let frag: any = null;
-        try {
-          frag = contract.interface.getFunction("settle");
-        } catch {
-          frag = null;
-        }
+        try { frag = contract.interface.getFunction("settle"); } catch { frag = null; }
 
         try {
           if (frag?.inputs?.length === 0) {
-            // settle()
             const tx = await contract.settle();
             await tx.wait();
           } else if (frag?.inputs?.length === 1 && frag?.inputs?.[0]?.type === "address[]") {
-            // settle(address[])
-            // cố lấy danh sách bidders từ event (nếu RPC không hỗ trợ logs, fallback dùng ví hiện tại)
-            let bidders: string[] = [];
-            try {
-              const latest = await provider.getBlockNumber();
-              const from = Math.max(0, latest - 8000); // cửa sổ nhỏ cho RPC public
-              const logs = await contract.queryFilter(contract.filters.BidSubmitted(), from, latest);
-              const uniq = new Set<string>();
-              logs.forEach((l: any) => uniq.add(l.args[0]));
-              bidders = Array.from(uniq);
-            } catch {
-              // fallback: dùng ví hiện tại (đủ cho demo 1 người bid)
-              bidders = [await signer.getAddress()];
+            // prefer locally tracked bidders; fall back to logs/signer
+            let list = [...bidders];
+            if (list.length === 0) {
+              try {
+                const latest = await provider.getBlockNumber();
+                const from = Math.max(0, latest - 8000);
+                const logs = await contract.queryFilter(contract.filters.BidSubmitted(), from, latest);
+                const uniq = new Set<string>();
+                logs.forEach((l: any) => uniq.add(l.args[0]));
+                list = Array.from(uniq);
+              } catch {/* ignore */}
             }
-            if (bidders.length === 0) {
-              alert("No bidders found to settle.");
-              setSettleBusy(null);
-              return;
-            }
-            const tx = await contract.settle(bidders);
+            if (list.length === 0) list = [await signer.getAddress()];
+
+            const tx = await contract.settle(list);
             await tx.wait();
           } else {
             throw new Error(`Unsupported settle signature: ${frag?.format?.("full") ?? "unknown"}`);
           }
-        } catch (e: any) {
-          // Một số RPC + FHEVM plugin có thể throw khi estimateGas, nhưng tx vẫn đã gửi/đã settle.
-          console.warn("settle attempt:", e?.message || e);
+        } catch (e) {
+          console.warn("settle attempt:", e);
         }
       }
 
-      // đọc ciphertext kết quả
+      // read ciphertexts
       const bidEnc: string = await contract.winningBidEnc();
       const idxEnc: string = await contract.winningIndexEnc();
       setWinner({ bidEnc, idxEnc });
 
-      // thử decrypt (best-effort)
+      // try decrypt (best-effort)
       try {
         const inst: any = await getFheInstance();
-        if (inst && typeof inst.userDecryptEuint === "function") {
+        if (inst?.userDecryptEuint) {
           const addr = await signer.getAddress();
           const bidClear = Number(await inst.userDecryptEuint("euint32", bidEnc, AUCTION_ADDRESS, addr));
           const idxClear = Number(await inst.userDecryptEuint("euint32", idxEnc, AUCTION_ADDRESS, addr));
@@ -259,11 +253,9 @@ export default function App() {
     }
   }
 
-  // ---------- derived ----------
   const nowSec = Math.floor(Date.now() / 1000);
   const ended = status.end ? nowSec >= status.end : false;
 
-  // ---------- UI ----------
   return (
     <div style={{ maxWidth: 560, margin: "40px auto", fontFamily: "Inter, system-ui" }}>
       <h1>FHE Auction</h1>
@@ -275,7 +267,6 @@ export default function App() {
         {wallet.address ? "Reconnect" : "Connect Wallet"}
       </button>
 
-      {/* status box */}
       <div style={{ marginTop: 16, padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
         <div><b>Item:</b> {status.item ?? "-"}</div>
         <div><b>End time:</b> {fmtTs(status.end)} {status.end ? (ended ? "· ended" : "· ongoing") : ""}</div>
@@ -283,6 +274,11 @@ export default function App() {
         <button onClick={() => refreshStatus()} style={{ marginTop: 8, padding: "6px 12px", borderRadius: 8 }}>
           Refresh status
         </button>
+      </div>
+
+      <div style={{ marginTop: 12, padding: 12, border: "1px dashed #ddd", borderRadius: 8, fontSize: 12 }}>
+        <b>Known bidders (local):</b>{" "}
+        {bidders.length ? bidders.map((b, i) => <span key={b}>{i ? ", " : ""}{shortHex(b, 6, 4)}</span>) : "—"}
       </div>
 
       <hr style={{ margin: "24px 0" }} />
@@ -304,11 +300,7 @@ export default function App() {
         </button>
       </form>
 
-      <button
-        onClick={settleAndReveal}
-        disabled={!!settleBusy}
-        style={{ padding: "10px 16px", borderRadius: 8, marginTop: 12 }}
-      >
+      <button onClick={settleAndReveal} disabled={!!settleBusy} style={{ padding: "10px 16px", borderRadius: 8, marginTop: 12 }}>
         {settleBusy ? settleBusy : "Settle & reveal"}
       </button>
 
