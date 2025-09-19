@@ -17,7 +17,6 @@ const auctionBytecode: string | undefined = (auctionAbiJson as any)?.bytecode;
 
 /** ---------- Types ---------- */
 type Wallet = { address: string | null; chainId: number | null };
-
 type AuctionStatus = {
   item: string;
   endTime: bigint;
@@ -35,6 +34,7 @@ const RPCS = [
 ];
 
 const LS_KEY = "fhe_auctions";
+const MIN_WARM_MS = 60_000; // đợi key “ấm” ít nhất 60s
 
 function fmtTs(ts?: bigint) {
   if (!ts) return "-";
@@ -323,7 +323,7 @@ export default function App() {
   /** FHE Readiness */
   const [fheReady, setFheReady] = useState<boolean>(false);
   const [fheReadySince, setFheReadySince] = useState<number | null>(null);
-  const fheWarmed = fheReady && (fheReadySince !== null ? nowMs() - fheReadySince >= 20_000 : false);
+  const fheWarmed = fheReady && (fheReadySince !== null ? nowMs() - fheReadySince >= MIN_WARM_MS : false);
 
   useEffect(() => {
     let stop = false;
@@ -342,6 +342,27 @@ export default function App() {
     return () => { stop = true; clearInterval(id); };
   }, [active]);
 
+  /** Preflight helper (simulate call & gas) */
+  async function preflight(signer: any, to: string, data: string) {
+    // 1) simulate
+    try {
+      await signer.call({ to, data });
+    } catch (err: any) {
+      const reason = decodeRevert(err);
+      const base = err?.shortMessage || err?.info?.error?.message || err?.message || "reverted";
+      throw new Error("Simulation failed: " + (reason ? reason : base));
+    }
+    // 2) gas estimate
+    try {
+      const g = await signer.estimateGas({ to, data });
+      return g && g > 0n ? g : 1_200_000n;
+    } catch (err: any) {
+      const reason = decodeRevert(err);
+      const base = err?.shortMessage || err?.info?.error?.message || err?.message || "estimateGas reverted";
+      throw new Error("Gas estimate failed: " + (reason ? reason : base));
+    }
+  }
+
   /** Actions */
   async function submitBid(ev: FormEvent) {
     ev.preventDefault();
@@ -349,34 +370,36 @@ export default function App() {
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
     if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
-    if (!fheWarmed) return setToast("FHE key chưa sẵn sàng/đang làm ấm, đợi vài giây rồi thử lại.");
+    if (!fheWarmed) {
+      const left = fheReadySince ? Math.max(0, Math.ceil((MIN_WARM_MS - (nowMs() - fheReadySince)) / 1000)) : 10;
+      return setToast(`FHE key đang làm ấm, vui lòng đợi ~${left}s rồi thử lại.`);
+    }
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
 
     try {
+      setBusy("Encrypting…");
       const net = await provider.getNetwork();
       if (Number(net.chainId) !== CHAIN_ID) await connect();
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 1) FHE public key
       await waitPublicKey(active, setBusy);
 
-      // 2) Encrypt + retry
       const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
-      // 3) Encode calldata & send
-      setBusy("Sending transaction…");
+      setBusy("Preparing transaction…");
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      let gasLimit = 1_200_000n;
-      try {
-        const est = await signer.estimateGas({ to: active, data });
-        if (est && est > 0n) gasLimit = est + (est / 5n);
-      } catch {}
+      // Preflight: simulate + gas
+      setBusy("Simulating…");
+      const gasEst = await preflight(signer, active, data);
+      const gasLimit = gasEst + gasEst / 5n;
 
+      // Send
+      setBusy("Sending transaction…");
       const tx = await signer.sendTransaction({ to: active, data, gasLimit });
       await tx.wait();
 
@@ -384,19 +407,11 @@ export default function App() {
       setBid("");
       await refreshDetail();
     } catch (err: any) {
-      const decoded = decodeRevert(err);
-      const base =
-        err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
-      const reason = decoded ? ` | Revert: ${decoded}` : "";
-      const txHash =
-        err?.transactionHash ||
-        err?.receipt?.transactionHash ||
-        err?.hash || "";
-      const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
-      const hint = /execution reverted|InvalidInput|Cipher|Proof|PublicKey|Invalid|input/i.test(base + reason)
-        ? " (Có thể FHE key/proof chưa đồng bộ hoàn toàn. Đợi 20–60s rồi thử lại.)"
+      const base = err?.message || err?.shortMessage || err?.info?.error?.message || "Unknown error";
+      const hint = /Simulation failed|estimate|revert|Invalid|Proof|Cipher|input/i.test(base)
+        ? " (FHE key/proof có thể chưa đồng bộ hoàn toàn. Hãy đợi thêm 20–60s và thử lại.)"
         : "";
-      setToast("Bid thất bại: " + base + reason + hint + link);
+      setToast("Bid thất bại: " + base + hint);
     } finally {
       setBusy(null);
     }
@@ -448,15 +463,13 @@ export default function App() {
       const signer = await provider.getSigner();
 
       if (!auctionBytecode) {
-        return setToast(
-          "Thiếu bytecode trong FHEAuction.json. Hãy dùng artifact Hardhat (có bytecode)."
-        );
+        return setToast("Thiếu bytecode trong FHEAuction.json. Hãy dùng artifact Hardhat (có bytecode).");
       }
 
       const factory = new ContractFactory(auctionAbi, auctionBytecode, signer);
       const c = await factory.deploy(name.trim(), secs);
       await c.waitForDeployment();
-      // @ts-ignore v6
+      // @ts-ignore ethers v6
       const newAddr: string = c.target;
 
       setToast(`Deploy thành công: ${newAddr}`);
@@ -470,7 +483,7 @@ export default function App() {
     }
   }
 
-  /** ---------- Simple quick create UI (header button) ---------- */
+  /** ---------- Simple quick create UI ---------- */
   const [creating, setCreating] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [newMinutes, setNewMinutes] = useState(10);
