@@ -1,32 +1,53 @@
 // src/lib/fhe.ts
-// Import động từ /bundle để Vite resolve được.
-// Gọi initSDK nếu SDK có export, rồi tạo instance.
+// Nạp Relayer SDK từ CDN ở runtime -> tránh lỗi bundling/initSDK.
+// Không import package vào bundle của Vite.
+
+declare global {
+  interface Window {
+    RelayerSDK?: any;
+  }
+}
 
 let _instPromise: Promise<any> | null = null;
+
+async function loadRelayerSDKFromCDN() {
+  // đã có thì thôi
+  if (window.RelayerSDK) return;
+
+  // jsDelivr: đổi sang unpkg cũng được. Cố định subpath "dist/bundle.min.js".
+  const url = "https://cdn.jsdelivr.net/npm/@zama-fhe/relayer-sdk/dist/bundle.min.js";
+
+  await new Promise<void>((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = url;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("Failed to load Relayer SDK from CDN"));
+    document.head.appendChild(s);
+  });
+
+  if (!window.RelayerSDK) {
+    throw new Error("RelayerSDK global not found after CDN load");
+  }
+}
 
 export async function getFheInstance() {
   if (!_instPromise) {
     _instPromise = (async () => {
-      const mod: any = await import('@zama-fhe/relayer-sdk/bundle');
+      await loadRelayerSDKFromCDN();
 
-      const initSDK =
-        mod?.initSDK || mod?.default?.initSDK || null;
-      const createInstance =
-        mod?.createInstance || mod?.default?.createInstance;
-      const SepoliaConfig =
-        mod?.SepoliaConfig || mod?.default?.SepoliaConfig;
+      const sdk = window.RelayerSDK || {};
+      // Một số bản SDK có initSDK, bản khác không — gọi an toàn
+      if (typeof sdk.initSDK === "function") {
+        await sdk.initSDK();
+      }
+
+      const createInstance = sdk.createInstance ?? sdk.default?.createInstance;
+      const SepoliaConfig = sdk.SepoliaConfig ?? sdk.default?.SepoliaConfig;
 
       if (!createInstance || !SepoliaConfig) {
-        throw new Error(
-          'relayer-sdk/bundle import mismatch (createInstance/SepoliaConfig not found)'
-        );
+        throw new Error("RelayerSDK not ready (createInstance/SepoliaConfig missing)");
       }
-
-      // Một số phiên bản bundle yêu cầu initSDK trước khi dùng
-      if (typeof initSDK === 'function') {
-        await initSDK();
-      }
-
       return createInstance(SepoliaConfig);
     })();
   }
