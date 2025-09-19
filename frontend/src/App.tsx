@@ -48,6 +48,7 @@ function fmtRemain(s: number) {
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+function nowMs() { return Date.now(); }
 function isAddress(s: string) {
   return /^0x[a-fA-F0-9]{40}$/.test(s);
 }
@@ -253,8 +254,14 @@ function Badge({
   color: "green" | "gray" | "orange" | "blue";
   children: any;
 }) {
-  const bg = color === "green" ? "#103e2a" : color === "orange" ? "#3f2b00" : color === "blue" ? "#0b274d" : "#2a2d35";
-  const tx = color === "green" ? "#50e3a4" : color === "orange" ? "#ffca70" : color === "blue" ? "#75a7ff" : "#cbd5e1";
+  const bg =
+    color === "green" ? "#103e2a" :
+    color === "orange" ? "#3f2b00" :
+    color === "blue" ? "#0b274d" : "#2a2d35";
+  const tx =
+    color === "green" ? "#50e3a4" :
+    color === "orange" ? "#ffca70" :
+    color === "blue" ? "#75a7ff" : "#cbd5e1";
   return <span className="badge" style={{ background: bg, color: tx }}>{children}</span>;
 }
 
@@ -387,7 +394,9 @@ export default function App() {
   const [bid, setBid] = useState("");
   const [busy, setBusy] = useState<null | string>(null);
   const [detail, setDetail] = useState<AuctionStatus | null>(null);
+
   const [fheReady, setFheReady] = useState<boolean>(false);
+  const [fheReadySince, setFheReadySince] = useState<number | null>(null);
   const ended = detail ? Number(detail.endTime) <= nowSec() : false;
 
   async function refreshDetail() {
@@ -410,18 +419,26 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail?.endTime, ended]);
 
-  // Poll FHE readiness cho active contract
+  // Poll FHE readiness + giữ "ấm" 20s
   useEffect(() => {
     let stop = false;
     async function tick() {
       if (!active) return;
       const ok = await isFheReady(active);
-      if (!stop) setFheReady(ok);
+      if (stop) return;
+      setFheReady((prev) => {
+        if (!prev && ok) setFheReadySince(nowMs());
+        if (!ok) setFheReadySince(null);
+        return ok;
+      });
     }
     tick();
     const id = setInterval(tick, 2000);
     return () => { stop = true; clearInterval(id); };
   }, [active]);
+
+  const fheWarmed =
+    fheReady && (fheReadySince !== null ? nowMs() - fheReadySince >= 20_000 : false);
 
   /* Actions */
   async function submitBid(e: React.FormEvent) {
@@ -429,8 +446,8 @@ export default function App() {
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
-    if (ended) return setToast("Phiên đã kết thúc.");
-    if (!fheReady) return setToast("FHE key chưa sẵn sàng. Vui lòng đợi vài giây.");
+    if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
+    if (!fheWarmed) return setToast("FHE key chưa sẵn sàng/đang làm ấm, đợi vài giây rồi thử lại.");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
@@ -441,17 +458,34 @@ export default function App() {
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 1) chờ public key (blocking ngắn)
+      // 1) Đảm bảo public key sẵn
       await waitPublicKey(active, setBusy);
 
-      // 2) encrypt (retry)
+      // 2) Encrypt + retry
       const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
-      // 3) gửi tx
+      // 3) Gửi tx với gasLimit rộng để tránh ước lượng sai
       setBusy("Sending transaction…");
       const contract = new Contract(active, auctionAbi, signer);
-      const tx = await contract.bid(enc.handles[0], enc.inputProof);
-      await tx.wait();
+
+      let txHash = "";
+      try {
+        const est = await contract.estimateGas
+          .bid(enc.handles[0], enc.inputProof)
+          .catch(() => null);
+        const tx = await contract.bid(
+          enc.handles[0],
+          enc.inputProof,
+          { gasLimit: est ?? 1_200_000 }
+        );
+        txHash = (tx as any)?.hash || "";
+        await tx.wait();
+      } catch {
+        const pop = await contract.populateTransaction.bid(enc.handles[0], enc.inputProof);
+        const tx2 = await signer.sendTransaction({ ...pop, gasLimit: 1_200_000 });
+        txHash = (tx2 as any)?.hash || txHash;
+        await provider.waitForTransaction(tx2.hash);
+      }
 
       setToast(`Đã gửi bid (encrypted) = ${bid}`);
       setBid("");
@@ -462,10 +496,15 @@ export default function App() {
       const base =
         err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       const reason = decoded ? ` | Revert: ${decoded}` : "";
-      const hint = /execution reverted|InvalidInput|Cipher|Proof|PublicKey/i.test(base + reason)
-        ? " (Có thể FHE key/proof chưa sẵn sàng. Đợi thêm 20–60s rồi thử lại.)"
+      const txHash =
+        err?.transactionHash ||
+        err?.receipt?.transactionHash ||
+        err?.hash || "";
+      const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
+      const hint = /execution reverted|InvalidInput|Cipher|Proof|PublicKey|Invalid|input/i.test(base + reason)
+        ? " (Có thể FHE key/proof vẫn chưa đồng bộ hoàn toàn. Đợi thêm 20–60s rồi thử lại.)"
         : "";
-      setToast("Bid thất bại: " + base + reason + hint);
+      setToast("Bid thất bại: " + base + reason + hint + link);
     } finally {
       setBusy(null);
     }
@@ -474,7 +513,7 @@ export default function App() {
   async function settleAndReveal() {
     if (!active) return;
     if (!detail) return setToast("Địa chỉ không tương thích.");
-    if (!ended) return setToast("Chưa hết hạn.");
+    if (Number(detail?.endTime || 0) > nowSec()) return setToast("Chưa hết hạn.");
     try {
       const anyWin = window as any;
       if (!anyWin.ethereum) return setToast("Hãy kết nối ví.");
@@ -667,16 +706,16 @@ export default function App() {
                   step={1}
                   value={bid}
                   onChange={(e) => setBid(e.target.value)}
-                  disabled={!detail || Number(detail?.endTime || 0) <= nowSec() || !!busy || !fheReady}
+                  disabled={!detail || Number(detail?.endTime || 0) <= nowSec() || !!busy || !fheWarmed}
                   className="input"
                 />
               </label>
               <button
                 type="submit"
-                disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec() || !fheReady}
+                disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec() || !fheWarmed}
                 className="btn btn--primary"
               >
-                {busy ? busy : (fheReady ? "Submit encrypted bid" : "Waiting FHE key…")}
+                {busy ? busy : (fheWarmed ? "Submit encrypted bid" : (fheReady ? "Warming FHE key…" : "Waiting FHE key…"))}
               </button>
             </form>
 
