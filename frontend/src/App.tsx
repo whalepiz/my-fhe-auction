@@ -125,6 +125,29 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
   }
 }
 
+/* ====== CHỜ FHE KEY SẴN SÀNG trước khi mã hoá/bid (fix revert) ====== */
+async function waitFheReady(addr: string, setBusy?: (s: string|null)=>void) {
+  try {
+    const inst = await getFheInstance();
+    if ((inst as any)?.waitForPublicKey) {
+      setBusy?.("Đang chuẩn bị khoá FHE…");
+      // một số SDK có tuỳ chọn timeoutMs
+      await (inst as any).waitForPublicKey(addr, { timeoutMs: 120000 }).catch(() => {});
+    } else if ((inst as any)?.getPublicKey) {
+      setBusy?.("Đang lấy khoá công khai FHE…");
+      await (inst as any).getPublicKey(addr).catch(() => {});
+    } else {
+      // fallback: đợi 8s (gateway thường cần vài giây sau deploy)
+      setBusy?.("Đang khởi tạo FHE…");
+      await new Promise((r) => setTimeout(r, 8000));
+    }
+  } catch {
+    // im lặng — encrypt sẽ tự báo nếu vẫn chưa sẵn sàng
+  } finally {
+    setBusy?.(null);
+  }
+}
+
 /* ======================== UI bits ======================== */
 function Badge({
   color,
@@ -362,6 +385,9 @@ export default function App() {
     const provider = new BrowserProvider(anyWin.ethereum);
 
     try {
+      // 🔑 chờ khoá FHE sẵn sàng cho contract (fix revert lúc mới deploy)
+      await waitFheReady(active, setBusy);
+
       setBusy("Đang mã hoá bid…");
       const net = await provider.getNetwork();
       if (Number(net.chainId) !== CHAIN_ID) await connect();
@@ -383,8 +409,16 @@ export default function App() {
     } catch (err: any) {
       console.error("submitBid error:", err);
       const msg =
-        err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
-      setToast("Bid thất bại: " + msg);
+        err?.shortMessage ||
+        err?.info?.error?.message ||
+        err?.message ||
+        "Unknown error";
+      // gợi ý người dùng nếu vừa deploy xong
+      const hint =
+        /execution reverted/i.test(msg)
+          ? " (Nếu vừa tạo auction, hãy đợi 10–30s để FHE key sẵn sàng rồi thử lại.)"
+          : "";
+      setToast("Bid thất bại: " + msg + hint);
     } finally {
       setBusy(null);
     }
@@ -453,16 +487,16 @@ export default function App() {
       const factory = new ContractFactory(auctionAbi, auctionBytecode, signer);
       const c = await factory.deploy(newItem.trim(), secs);
       await c.waitForDeployment();
-
-      // ethers v6: địa chỉ ở .target
-      // @ts-ignore
+      // @ts-ignore ethers v6
       const newAddr: string = c.target;
-      setToast(`Deploy thành công: ${newAddr}`);
+
+      setToast(`Deploy thành công: ${newAddr} — đang chuẩn bị FHE key…`);
       setAddrList((old) => [newAddr, ...old]);
       setActive(newAddr);
-      setOpenCreate(false);
-      setNewItem("");
-      setNewMinutes(10);
+
+      // 👇 đợi khoá FHE sẵn sàng ngay sau deploy để người dùng bid không bị revert
+      await waitFheReady(newAddr);
+      await refreshDetail();
     } catch (err: any) {
       console.error("createAuction error:", err);
       const msg =
@@ -470,6 +504,9 @@ export default function App() {
       setToast("Deploy thất bại: " + msg);
     } finally {
       setCreating(false);
+      setOpenCreate(false);
+      setNewItem("");
+      setNewMinutes(10);
     }
   }
 
@@ -722,8 +759,8 @@ export default function App() {
             </button>
           </div>
           <div style={{ fontSize: 12, opacity: 0.7 }}>
-            Lưu ý: yêu cầu `frontend/src/abi/FHEAuction.json` là **artifact Hardhat** để
-            có <code>bytecode</code> phục vụ deploy.
+            Lưu ý: yêu cầu <code>frontend/src/abi/FHEAuction.json</code> là **artifact Hardhat** (có <code>bytecode</code>)
+            để deploy từ UI; và sau khi deploy nên đợi vài giây để FHE key sẵn sàng.
           </div>
         </div>
       </Modal>
