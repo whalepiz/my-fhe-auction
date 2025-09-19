@@ -1,58 +1,32 @@
 // src/lib/fhe.ts
-// Tải Relayer SDK từ CDN bằng dynamic import (ESM) với nhiều fallback.
-// Không import package cục bộ, không chèn <script>.
+// Nạp SDK từ CDN Zama (đã có wasm đúng MIME) theo kiểu dynamic import.
 
-let _sdkPromise: Promise<any> | null = null;
-let _instPromise: Promise<any> | null = null;
-
-async function loadRelayerSDK() {
-  if (_sdkPromise) return _sdkPromise;
-
-  _sdkPromise = (async () => {
-    const candidates = [
-      // jsDelivr ESM
-      "https://cdn.jsdelivr.net/npm/@zama-fhe/relayer-sdk/+esm",
-      // esm.sh CDN
-      "https://esm.sh/@zama-fhe/relayer-sdk",
-      // unpkg ESM
-      "https://unpkg.com/@zama-fhe/relayer-sdk?module",
-    ];
-
-    for (const url of candidates) {
-      try {
-        // @vite-ignore để Vite không prebundle URL ngoài
-        const mod: any = await import(/* @vite-ignore */ url);
-        return mod;
-      } catch {
-        // thử URL tiếp theo
-      }
-    }
-    throw new Error("Failed to load Relayer SDK from CDN");
-  })();
-
-  return _sdkPromise;
-}
+let cached: any = null;
 
 export async function getFheInstance() {
-  if (_instPromise) return _instPromise;
+  if (cached) return cached;
 
-  _instPromise = (async () => {
-    const mod: any = await loadRelayerSDK();
+  // Dùng biến string (không để trực tiếp trong import) để tránh TS2307
+  const ZAMA_CDN: string =
+    "https://cdn.zama.ai/relayer-sdk-js/0.2.0/relayer-sdk-js.js";
 
-    // Tự tương thích cả named lẫn default export
-    const initSDK = mod?.initSDK || mod?.default?.initSDK;
-    const createInstance = mod?.createInstance || mod?.default?.createInstance;
-    const SepoliaConfig = mod?.SepoliaConfig || mod?.default?.SepoliaConfig;
+  // @ts-ignore: để TS khỏi đòi type declarations cho URL ngoài
+  const mod: any = await import(/* @vite-ignore */ ZAMA_CDN);
 
-    if (typeof initSDK === "function") {
-      await initSDK();
-    }
-    if (!createInstance || !SepoliaConfig) {
-      throw new Error("Relayer SDK missing createInstance/SepoliaConfig after load");
-    }
+  const initSDK = mod?.initSDK ?? mod?.default?.initSDK;
+  if (typeof initSDK === "function") {
+    await initSDK();
+  }
 
-    return createInstance(SepoliaConfig);
-  })();
+  const createInstance = mod?.createInstance ?? mod?.default?.createInstance;
+  const SepoliaConfig = mod?.SepoliaConfig ?? mod?.default?.SepoliaConfig;
 
-  return _instPromise;
+  if (!createInstance || !SepoliaConfig) {
+    throw new Error("Relayer SDK missing createInstance/SepoliaConfig");
+  }
+
+  // Dùng provider của MetaMask
+  const cfg = { ...SepoliaConfig, network: (window as any).ethereum };
+  cached = await createInstance(cfg);
+  return cached;
 }
