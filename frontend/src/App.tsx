@@ -60,7 +60,7 @@ const RPCS = [
   "https://rpc2.sepolia.org",
 ];
 
-/* Đọc trạng thái CHỈ qua RPC công cộng để tránh BAD_DATA từ BrowserProvider */
+/* Đọc trạng thái CHỈ qua RPC công để tránh BAD_DATA từ BrowserProvider */
 const USE_BROWSER_READ = false;
 
 async function getBrowserReadProvider(): Promise<BrowserProvider | null> {
@@ -154,7 +154,33 @@ function initialAddrList(): string[] {
   return Array.from(new Set([...env, ...ls]));
 }
 
-/* ====== CHỜ/RETRY FHE key & encrypt (fix revert ngay sau deploy) ====== */
+/* ====== CHỜ PUBLIC KEY + ENCRYPT RETRY ====== */
+async function waitPublicKey(contractAddr: string, setBusy?: (s: string|null)=>void) {
+  try {
+    const inst = await getFheInstance();
+    if ((inst as any)?.waitForPublicKey) {
+      setBusy?.("Preparing FHE key…");
+      await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 120000 });
+      return;
+    }
+    // SDK cũ: poll getPublicKey
+    for (let i = 1; i <= 8; i++) {
+      try {
+        setBusy?.(`Fetching FHE key… (try ${i}/8)`);
+        if ((inst as any)?.getPublicKey) {
+          await (inst as any).getPublicKey(contractAddr);
+          return;
+        }
+        break;
+      } catch {
+        await sleep(1500 * i);
+      }
+    }
+  } finally {
+    setBusy?.(null);
+  }
+}
+
 async function encryptBidWithRetry(
   contractAddr: string,
   signerAddr: string,
@@ -162,144 +188,62 @@ async function encryptBidWithRetry(
   setBusy?: (s: string | null) => void
 ) {
   const inst = await getFheInstance();
-
-  // Thử tối đa 6 lần, backoff tăng dần
   for (let i = 1; i <= 6; i++) {
     try {
-      setBusy?.(`Chuẩn bị FHE key… (lần ${i}/6)`);
-      // một số SDK có waitForPublicKey/getPublicKey, nhưng để generic ta thử encrypt luôn
+      setBusy?.(`Encrypting (try ${i}/6)…`);
       const buf = inst.createEncryptedInput(contractAddr, signerAddr);
       buf.add32(value);
-      setBusy?.("Đang mã hoá bid…");
       const enc = await buf.encrypt();
       return enc;
     } catch (e: any) {
       const msg = String(e?.message || "");
       const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch/i.test(msg);
-      if (!retriable || i === 6) {
-        throw e;
-      }
-      // backoff: 2s, 3s, 4s, 6s, 8s
+      if (!retriable || i === 6) throw e;
       const waits = [2000, 3000, 4000, 6000, 8000];
       await sleep(waits[i - 1] ?? 8000);
-      continue;
     }
   }
   throw new Error("FHE key chưa sẵn sàng.");
 }
 
-/* ======================== UI bits ======================== */
-function Badge({
-  color,
-  children,
-}: {
-  color: "green" | "gray" | "orange" | "blue";
-  children: any;
-}) {
+/* ======================== UI bits (dark theme) ======================== */
+function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: any; }) {
   const bg =
-    color === "green"
-      ? "#e8f9f0"
-      : color === "orange"
-      ? "#fff4e5"
-      : color === "blue"
-      ? "#eaf3ff"
-      : "#f3f4f6";
+    color === "green" ? "#103e2a" :
+    color === "orange" ? "#3f2b00" :
+    color === "blue" ? "#0b274d" : "#2a2d35";
   const tx =
-    color === "green"
-      ? "#057a55"
-      : color === "orange"
-      ? "#ad5700"
-      : color === "blue"
-      ? "#0b5ed7"
-      : "#374151";
+    color === "green" ? "#50e3a4" :
+    color === "orange" ? "#ffca70" :
+    color === "blue" ? "#75a7ff" : "#cbd5e1";
   return (
-    <span
-      style={{
-        display: "inline-block",
-        padding: "2px 8px",
-        borderRadius: 999,
-        fontSize: 12,
-        fontWeight: 600,
-        background: bg,
-        color: tx,
-        border: `1px solid ${tx}20`,
-      }}
-    >
-      {children}
-    </span>
+    <span className="badge" style={{ background: bg, color: tx }}>{children}</span>
   );
 }
 
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null as any;
   return (
-    <div
-      style={{
-        position: "fixed",
-        right: 16,
-        bottom: 16,
-        background: "white",
-        border: "1px solid #e5e7eb",
-        borderRadius: 12,
-        padding: "10px 14px",
-        boxShadow: "0 8px 24px rgba(0,0,0,0.07)",
-        maxWidth: 360,
-        zIndex: 9999,
-      }}
-    >
-      <div style={{ fontWeight: 600, marginBottom: 4 }}>Thông báo</div>
-      <div style={{ fontSize: 13, opacity: 0.9 }}>{text}</div>
-      <div style={{ marginTop: 8, textAlign: "right" }}>
-        <button onClick={onClose} style={{ padding: "6px 10px", borderRadius: 8 }}>
-          OK
-        </button>
+    <div className="toast">
+      <div className="toast__title">Thông báo</div>
+      <div className="toast__body">{text}</div>
+      <div className="toast__footer">
+        <button onClick={onClose} className="btn">OK</button>
       </div>
     </div>
   );
 }
 
-function Modal({
-  open,
-  children,
-  onClose,
-  title,
-}: {
-  open: boolean;
-  children: any;
-  onClose: () => void;
-  title: string;
-}) {
+function Modal({ open, children, onClose, title }:{ open: boolean; children: any; onClose: () => void; title: string; }) {
   if (!open) return null as any;
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.35)",
-        display: "grid",
-        placeItems: "center",
-        zIndex: 9998,
-      }}
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: "min(520px, 92vw)",
-          background: "white",
-          borderRadius: 14,
-          border: "1px solid #e5e7eb",
-          padding: 16,
-          boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ margin: 0 }}>{title}</h3>
-          <button onClick={onClose} style={{ padding: "6px 10px", borderRadius: 8 }}>
-            ✕
-          </button>
+    <div className="modal__backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal__header">
+          <h3>{title}</h3>
+          <button onClick={onClose} className="btn">✕</button>
         </div>
-        <div style={{ marginTop: 12 }}>{children}</div>
+        <div className="modal__content">{children}</div>
       </div>
     </div>
   );
@@ -309,6 +253,7 @@ function Modal({
 export default function App() {
   /* Wallet */
   const [wallet, setWallet] = useState<Wallet>({ address: null, chainId: null });
+
   async function connect() {
     const anyWin = window as any;
     if (!anyWin.ethereum) return alert("MetaMask không tìm thấy");
@@ -351,7 +296,7 @@ export default function App() {
     setWallet({ address: await signer.getAddress(), chainId: Number(net.chainId) });
   }
 
-  /* Danh sách auction (persist + có thể thêm mới từ UI) */
+  /* Danh sách auction (persist + thêm mới) */
   const initialAddresses = useMemo(initialAddrList, []);
   const [addrList, setAddrList] = useState<string[]>(initialAddresses);
   const [active, setActive] = useState<string>(initialAddresses[0] ?? "");
@@ -365,11 +310,10 @@ export default function App() {
   const [newMinutes, setNewMinutes] = useState<number>(10);
   const [creating, setCreating] = useState(false);
 
-  // Khi danh sách thay đổi -> lưu xuống localStorage để F5 vẫn còn
-  useEffect(() => {
-    saveLocalAddrs(addrList);
-  }, [addrList]);
+  // Persist LS
+  useEffect(() => { saveLocalAddrs(addrList); }, [addrList]);
 
+  // Load status list
   useEffect(() => {
     (async () => {
       if (!addrList.length) return;
@@ -435,10 +379,14 @@ export default function App() {
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 🔑 Encrypt có retry/backoff để chờ public key
+      // 1) chờ public key
+      await waitPublicKey(active, setBusy);
+
+      // 2) encrypt (có retry)
       const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
-      setBusy("Gửi giao dịch…");
+      // 3) gửi tx
+      setBusy("Sending transaction…");
       const contract = new Contract(active, auctionAbi, signer);
       const tx = await contract.bid(enc.handles[0], enc.inputProof);
       await tx.wait();
@@ -449,12 +397,9 @@ export default function App() {
     } catch (err: any) {
       console.error("submitBid error:", err);
       const msg =
-        err?.shortMessage ||
-        err?.info?.error?.message ||
-        err?.message ||
-        "Unknown error";
-      const hint = /execution reverted/i.test(msg)
-        ? " (Nếu vừa tạo auction, hãy đợi thêm 10–30s để FHE key sẵn sàng rồi thử lại.)"
+        err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
+      const hint = /execution reverted/i.test(String(msg))
+        ? " (Nếu vừa tạo auction, đợi 20–60s cho FHE key sẵn sàng rồi thử lại.)"
         : "";
       setToast("Bid thất bại: " + msg + hint);
     } finally {
@@ -466,7 +411,6 @@ export default function App() {
     if (!active) return;
     if (!detail) return setToast("Địa chỉ không tương thích.");
     if (!ended) return setToast("Chưa hết hạn.");
-
     try {
       const anyWin = window as any;
       if (!anyWin.ethereum) return setToast("Hãy kết nối ví.");
@@ -531,11 +475,7 @@ export default function App() {
       setToast(`Deploy thành công: ${newAddr}`);
       const next = Array.from(new Set([newAddr, ...addrList]));
       setAddrList(next);
-      setActive(newAddr); // set active ngay
-      // Lưu LS sẽ tự động do useEffect ở trên
-
-      // Sau deploy, public key có thể cần vài giây để sẵn sàng
-      // (người dùng bid ngay có thể gặp retry encrypt ở submit)
+      setActive(newAddr);
       await refreshDetail();
     } catch (err: any) {
       console.error("createAuction error:", err);
@@ -552,26 +492,16 @@ export default function App() {
 
   /* ======================== RENDER ======================== */
   return (
-    <div style={{ maxWidth: 1120, margin: "24px auto", fontFamily: "Inter, system-ui", padding: "0 16px" }}>
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
+    <div className="page">
+      <header className="header">
         <div>
-          <div style={{ fontSize: 28, fontWeight: 800 }}>FHE Auction</div>
-          <div style={{ fontSize: 12, opacity: 0.65 }}>
-            Fully Homomorphic Encrypted bidding on Sepolia
-          </div>
+          <div className="brand">⚡ FHE Auction</div>
+          <div className="brand__sub">Anonymous encrypted bidding on Sepolia</div>
         </div>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          <button
-            onClick={() => setOpenCreate(true)}
-            style={{ padding: "8px 14px", borderRadius: 10, border: "1px solid #e5e7eb", background: "#111827", color: "white" }}
-            title="Deploy một phiên đấu giá mới"
-          >
-            + Create auction
-          </button>
-          <button onClick={connect} style={{ padding: "8px 14px", borderRadius: 10, border: "1px solid #e5e7eb" }}>
-            {wallet.address ? "Reconnect" : "Connect Wallet"}
-          </button>
-          <div style={{ fontSize: 12, opacity: 0.75 }}>
+        <div className="header__actions">
+          <button onClick={() => setOpenCreate(true)} className="btn btn--primary">+ Create auction</button>
+          <button onClick={connect} className="btn">{wallet.address ? "Reconnect" : "Connect Wallet"}</button>
+          <div className="hint">
             {wallet.address
               ? `Connected ${wallet.address.slice(0, 6)}… (chain ${wallet.chainId})`
               : "Not connected"}
@@ -579,15 +509,15 @@ export default function App() {
         </div>
       </header>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(280px, 1fr) 1fr", gap: 16 }}>
+      <div className="grid">
         {/* LIST */}
-        <section>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-            <h3 style={{ margin: 0 }}>Auctions</h3>
-            {loadingList && <span style={{ fontSize: 12, opacity: 0.7 }}>Loading…</span>}
+        <section className="card">
+          <div className="card__header">
+            <h3>Auctions</h3>
+            {loadingList && <span className="muted">Loading…</span>}
           </div>
 
-          <div style={{ display: "grid", gap: 12 }}>
+          <div className="list">
             {(addrList.length ? addrList : [""]).map((addr) => {
               const st = listStatus[addr];
               const incompatible = st === null;
@@ -596,78 +526,43 @@ export default function App() {
               const endedCard = st ? Number(st.endTime) <= nowSec() : false;
 
               return (
-                <div
-                  key={addr}
-                  style={{
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 14,
-                    padding: 12,
-                    background: isActive ? "#f8f9ff" : "white",
-                  }}
-                >
+                <div key={addr} className={`auction ${isActive ? "auction--active" : ""}`}>
                   {meta?.image && (
-                    <div style={{ marginBottom: 8 }}>
-                      <img
-                        src={meta.image}
-                        alt={meta?.title || st?.item || "Auction item"}
-                        style={{ width: "100%", height: 140, objectFit: "cover", borderRadius: 10 }}
-                      />
-                    </div>
+                    <img src={meta.image} alt={meta?.title || st?.item || "Auction"} className="auction__img" />
                   )}
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                    <div style={{ fontWeight: 700 }}>
-                      {st === undefined
-                        ? "loading…"
-                        : incompatible
-                        ? "(incompatible)"
-                        : meta?.title || st?.item || "(unknown)"}
+
+                  <div className="auction__title">
+                    <div className="title">
+                      {st === undefined ? "loading…" : incompatible ? "(incompatible)" : meta?.title || st?.item || "(unknown)"}
                     </div>
                     {st && (
-                      <>
+                      <div>
                         {!st.settled && !endedCard && <Badge color="green">Ongoing</Badge>}
                         {!st.settled && endedCard && <Badge color="orange">Ended</Badge>}
                         {st.settled && <Badge color="blue">Settled</Badge>}
-                      </>
+                      </div>
                     )}
                   </div>
-                  {meta?.description && (
-                    <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
-                      {meta.description}
-                    </div>
-                  )}
 
-                  <div style={{ fontSize: 12, opacity: 0.8 }}>
-                    End: {incompatible ? "-" : st ? (Number(st.endTime) > nowSec() ? "ongoing" : "ended") : "-"} ·{" "}
-                    {st ? fmtTs(st.endTime) : "-"}
-                    {st && Number(st.endTime) > nowSec() && (
-                      <> · <span style={{ fontWeight: 600 }}>{fmtRemain(Number(st.endTime) - nowSec())}</span></>
-                    )}
-                  </div>
-                  <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>
-                    Settled: {incompatible ? "-" : st?.settled ? "true" : "false"}
-                  </div>
+                  {meta?.description && <div className="muted">{meta.description}</div>}
 
-                  <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+                  <div className="muted">
+                    End: {incompatible ? "-" : st ? (Number(st.endTime) > nowSec() ? "ongoing" : "ended") : "-"} · {st ? fmtTs(st.endTime) : "-"}
+                    {st && Number(st.endTime) > nowSec() && <> · <b>{fmtRemain(Number(st.endTime) - nowSec())}</b></>}
+                  </div>
+                  <div className="muted">Settled: {incompatible ? "-" : st?.settled ? "true" : "false"}</div>
+
+                  <div className="row">
                     <button
                       onClick={() => setActive(addr)}
                       disabled={incompatible}
-                      style={{ padding: "6px 10px", borderRadius: 8, opacity: incompatible ? 0.5 : 1 }}
+                      className="btn"
                     >
                       Open
                     </button>
-                    <a
-                      href={`https://sepolia.etherscan.io/address/${addr}`}
-                      target="_blank" rel="noreferrer"
-                      style={{ fontSize: 12 }}
-                    >
-                      Etherscan
-                    </a>
-                    <code
-                      onClick={() =>
-                        navigator.clipboard?.writeText(addr).then(() => setToast("Đã copy địa chỉ hợp đồng."))
-                      }
-                      title="Copy"
-                      style={{ fontSize: 11, opacity: 0.7, cursor: "pointer", userSelect: "none" }}
+                    <a className="link" href={`https://sepolia.etherscan.io/address/${addr}`} target="_blank" rel="noreferrer">Etherscan</a>
+                    <code className="addr" title="Copy"
+                      onClick={() => navigator.clipboard?.writeText(addr).then(() => setToast("Đã copy địa chỉ hợp đồng."))}
                     >
                       {addr.slice(0, 8)}…{addr.slice(-6)}
                     </code>
@@ -680,36 +575,31 @@ export default function App() {
 
         {/* ACTIVE */}
         {!!active && (
-          <section style={{ border: "1px solid #e5e7eb", borderRadius: 14, padding: 14 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <h3 style={{ margin: 0 }}>Active auction</h3>
-              <button onClick={refreshDetail} style={{ padding: "6px 10px", borderRadius: 8 }}>
-                Refresh status
-              </button>
+          <section className="card">
+            <div className="card__header">
+              <h3>Active auction</h3>
+              <button onClick={refreshDetail} className="btn">Refresh status</button>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8, marginTop: 8 }}>
+            <div className="kv">
               <div><b>Item:</b> {detail?.item ?? "-"}</div>
               <div>
                 <b>End time:</b> {detail ? fmtTs(detail.endTime) : "-"} ·{" "}
-                {detail
-                  ? Number(detail.endTime) > nowSec()
-                    ? <>ongoing · <span style={{ fontWeight: 600 }}>{fmtRemain(Number(detail.endTime) - nowSec())}</span></>
-                    : "ended"
-                  : "-"}
+                {detail ? (Number(detail.endTime) > nowSec()
+                  ? <>ongoing · <b>{fmtRemain(Number(detail.endTime) - nowSec())}</b></>
+                  : "ended") : "-"}
               </div>
               <div><b>Settled:</b> {detail?.settled ? "true" : "false"}</div>
-
               {detail?.settled && (
-                <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>
+                <div className="muted">
                   <div>winningBidEnc: <code>{detail.winningBidEnc}</code></div>
                   <div>winningIndexEnc: <code>{detail.winningIndexEnc}</code></div>
                 </div>
               )}
             </div>
 
-            <form onSubmit={submitBid} style={{ display: "grid", gap: 12, maxWidth: 500, marginTop: 16 }}>
-              <label style={{ fontSize: 14 }}>
+            <form onSubmit={submitBid} className="form">
+              <label className="label">
                 Your bid (uint32)
                 <input
                   type="number"
@@ -718,40 +608,28 @@ export default function App() {
                   value={bid}
                   onChange={(e) => setBid(e.target.value)}
                   disabled={!detail || Number(detail?.endTime || 0) <= nowSec() || !!busy}
-                  style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd", marginTop: 6 }}
+                  className="input"
                 />
               </label>
               <button
                 type="submit"
                 disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec()}
-                style={{
-                  padding: "10px 16px",
-                  borderRadius: 8,
-                  background: "#111827",
-                  color: "white",
-                  border: "none",
-                  opacity: !!busy || !detail || Number(detail?.endTime || 0) <= nowSec() ? 0.5 : 1,
-                }}
+                className="btn btn--primary"
               >
                 {busy ? busy : "Submit encrypted bid"}
               </button>
             </form>
 
-            <div style={{ marginTop: 12 }}>
-              <button
-                onClick={settleAndReveal}
-                disabled={!detail || !(Number(detail?.endTime || 0) <= nowSec())}
-                style={{
-                  padding: "8px 14px",
-                  borderRadius: 8,
-                  opacity: !detail || !(Number(detail?.endTime || 0) <= nowSec()) ? 0.5 : 1,
-                }}
-              >
-                Settle & reveal
-              </button>
-            </div>
+            <div className="spacer8" />
+            <button
+              onClick={settleAndReveal}
+              disabled={!detail || !(Number(detail?.endTime || 0) <= nowSec())}
+              className="btn"
+            >
+              Settle & reveal
+            </button>
 
-            <p style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>
+            <p className="muted small">
               Active contract: {active} · Chain: {CHAIN_ID}
             </p>
           </section>
@@ -759,48 +637,34 @@ export default function App() {
       </div>
 
       <Modal open={openCreate} onClose={() => setOpenCreate(false)} title="Create new auction">
-        <div style={{ display: "grid", gap: 10 }}>
-          <label>
+        <div className="form">
+          <label className="label">
             Item name
             <input
               value={newItem}
               onChange={(e) => setNewItem(e.target.value)}
               placeholder="e.g. Rare NFT #X"
-              style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd", marginTop: 6 }}
+              className="input"
             />
           </label>
-          <label>
+          <label className="label">
             Duration (minutes)
             <input
               type="number"
               min={1}
               value={newMinutes}
               onChange={(e) => setNewMinutes(Number(e.target.value))}
-              style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd", marginTop: 6 }}
+              className="input"
             />
           </label>
-          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-            <button onClick={() => setOpenCreate(false)} style={{ padding: "8px 12px", borderRadius: 8 }}>
-              Cancel
-            </button>
-            <button
-              onClick={createAuction}
-              disabled={creating}
-              style={{
-                padding: "8px 12px",
-                borderRadius: 8,
-                background: "#111827",
-                color: "white",
-                border: "none",
-                opacity: creating ? 0.6 : 1,
-              }}
-            >
+          <div className="row end">
+            <button onClick={() => setOpenCreate(false)} className="btn">Cancel</button>
+            <button onClick={createAuction} disabled={creating} className="btn btn--primary">
               {creating ? "Deploying…" : "Deploy"}
             </button>
           </div>
-          <div style={{ fontSize: 12, opacity: 0.7 }}>
-            Yêu cầu file <code>frontend/src/abi/FHEAuction.json</code> là artifact Hardhat (có <code>bytecode</code>).
-            Sau khi deploy, FHE key có thể cần vài giây để sẵn sàng; khi bid, app sẽ tự retry.
+          <div className="muted small">
+            Cần file <code>frontend/src/abi/FHEAuction.json</code> là artifact Hardhat (có <code>bytecode</code>).
           </div>
         </div>
       </Modal>
