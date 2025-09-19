@@ -1,4 +1,5 @@
-import React, { FormEvent, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import {
   BrowserProvider,
   Contract,
@@ -34,7 +35,7 @@ const RPCS = [
 ];
 
 const LS_KEY = "fhe_auctions";
-const MIN_WARM_MS = 60_000; // đợi key “ấm” ít nhất 60s
+const MIN_WARM_MS = 60_000; // chờ key “ấm” tối thiểu 60s
 
 function fmtTs(ts?: bigint) {
   if (!ts) return "-";
@@ -489,8 +490,6 @@ export default function App() {
   const [newMinutes, setNewMinutes] = useState(10);
 
   /** ---------- Render ---------- */
-  const ended = detail ? Number(detail.endTime) <= nowSec() : false;
-
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
