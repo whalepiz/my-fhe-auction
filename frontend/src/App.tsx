@@ -155,7 +155,7 @@ function initialAddrList(): string[] {
 }
 
 /* ====== CHỜ PUBLIC KEY + ENCRYPT RETRY ====== */
-async function waitPublicKey(contractAddr: string, setBusy?: (s: string|null)=>void) {
+async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
   try {
     const inst = await getFheInstance();
     if ((inst as any)?.waitForPublicKey) {
@@ -181,6 +181,24 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string|null)=>v
   }
 }
 
+// Kiểm tra key sẵn sàng → để bật/tắt nút tự động
+async function isFheReady(contractAddr: string): Promise<boolean> {
+  try {
+    const inst = await getFheInstance();
+    if ((inst as any)?.waitForPublicKey) {
+      await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 1 });
+      return true;
+    }
+    if ((inst as any)?.getPublicKey) {
+      await (inst as any).getPublicKey(contractAddr);
+      return true;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function encryptBidWithRetry(
   contractAddr: string,
   signerAddr: string,
@@ -188,37 +206,56 @@ async function encryptBidWithRetry(
   setBusy?: (s: string | null) => void
 ) {
   const inst = await getFheInstance();
-  for (let i = 1; i <= 6; i++) {
+  for (let i = 1; i <= 10; i++) {
     try {
-      setBusy?.(`Encrypting (try ${i}/6)…`);
+      setBusy?.(`Encrypting (try ${i}/10)…`);
       const buf = inst.createEncryptedInput(contractAddr, signerAddr);
       buf.add32(value);
       const enc = await buf.encrypt();
       return enc;
     } catch (e: any) {
       const msg = String(e?.message || "");
-      const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch/i.test(msg);
-      if (!retriable || i === 6) throw e;
-      const waits = [2000, 3000, 4000, 6000, 8000];
-      await sleep(waits[i - 1] ?? 8000);
+      const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
+      if (!retriable || i === 10) throw e;
+      await sleep(1000 * i); // 1s..10s
     }
   }
   throw new Error("FHE key chưa sẵn sàng.");
 }
 
+/* Decode custom error để thấy lý do revert thực sự */
+function decodeRevert(err: any): string | null {
+  try {
+    const data =
+      err?.data?.data ||
+      err?.error?.data ||
+      err?.error?.error?.data ||
+      err?.info?.error?.data ||
+      err?.data ||
+      err?.receipt?.revertReason ||
+      null;
+    if (!data) return null;
+    const iface = new Interface(auctionAbi);
+    const parsed = iface.parseError(data);
+    if (!parsed) return null;
+    const args = parsed?.args ? JSON.stringify(parsed.args) : "";
+    return `${parsed.name}${args ? " " + args : ""}`;
+  } catch {
+    return null;
+  }
+}
+
 /* ======================== UI bits (dark theme) ======================== */
-function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: any; }) {
-  const bg =
-    color === "green" ? "#103e2a" :
-    color === "orange" ? "#3f2b00" :
-    color === "blue" ? "#0b274d" : "#2a2d35";
-  const tx =
-    color === "green" ? "#50e3a4" :
-    color === "orange" ? "#ffca70" :
-    color === "blue" ? "#75a7ff" : "#cbd5e1";
-  return (
-    <span className="badge" style={{ background: bg, color: tx }}>{children}</span>
-  );
+function Badge({
+  color,
+  children,
+}: {
+  color: "green" | "gray" | "orange" | "blue";
+  children: any;
+}) {
+  const bg = color === "green" ? "#103e2a" : color === "orange" ? "#3f2b00" : color === "blue" ? "#0b274d" : "#2a2d35";
+  const tx = color === "green" ? "#50e3a4" : color === "orange" ? "#ffca70" : color === "blue" ? "#75a7ff" : "#cbd5e1";
+  return <span className="badge" style={{ background: bg, color: tx }}>{children}</span>;
 }
 
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
@@ -234,7 +271,17 @@ function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   );
 }
 
-function Modal({ open, children, onClose, title }:{ open: boolean; children: any; onClose: () => void; title: string; }) {
+function Modal({
+  open,
+  children,
+  onClose,
+  title,
+}: {
+  open: boolean;
+  children: any;
+  onClose: () => void;
+  title: string;
+}) {
   if (!open) return null as any;
   return (
     <div className="modal__backdrop" onClick={onClose}>
@@ -340,6 +387,7 @@ export default function App() {
   const [bid, setBid] = useState("");
   const [busy, setBusy] = useState<null | string>(null);
   const [detail, setDetail] = useState<AuctionStatus | null>(null);
+  const [fheReady, setFheReady] = useState<boolean>(false);
   const ended = detail ? Number(detail.endTime) <= nowSec() : false;
 
   async function refreshDetail() {
@@ -362,6 +410,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail?.endTime, ended]);
 
+  // Poll FHE readiness cho active contract
+  useEffect(() => {
+    let stop = false;
+    async function tick() {
+      if (!active) return;
+      const ok = await isFheReady(active);
+      if (!stop) setFheReady(ok);
+    }
+    tick();
+    const id = setInterval(tick, 2000);
+    return () => { stop = true; clearInterval(id); };
+  }, [active]);
+
   /* Actions */
   async function submitBid(e: React.FormEvent) {
     e.preventDefault();
@@ -369,6 +430,7 @@ export default function App() {
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
     if (ended) return setToast("Phiên đã kết thúc.");
+    if (!fheReady) return setToast("FHE key chưa sẵn sàng. Vui lòng đợi vài giây.");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
@@ -379,10 +441,10 @@ export default function App() {
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 1) chờ public key
+      // 1) chờ public key (blocking ngắn)
       await waitPublicKey(active, setBusy);
 
-      // 2) encrypt (có retry)
+      // 2) encrypt (retry)
       const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
       // 3) gửi tx
@@ -396,12 +458,14 @@ export default function App() {
       await refreshDetail();
     } catch (err: any) {
       console.error("submitBid error:", err);
-      const msg =
+      const decoded = decodeRevert(err);
+      const base =
         err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
-      const hint = /execution reverted/i.test(String(msg))
-        ? " (Nếu vừa tạo auction, đợi 20–60s cho FHE key sẵn sàng rồi thử lại.)"
+      const reason = decoded ? ` | Revert: ${decoded}` : "";
+      const hint = /execution reverted|InvalidInput|Cipher|Proof|PublicKey/i.test(base + reason)
+        ? " (Có thể FHE key/proof chưa sẵn sàng. Đợi thêm 20–60s rồi thử lại.)"
         : "";
-      setToast("Bid thất bại: " + msg + hint);
+      setToast("Bid thất bại: " + base + reason + hint);
     } finally {
       setBusy(null);
     }
@@ -553,15 +617,11 @@ export default function App() {
                   <div className="muted">Settled: {incompatible ? "-" : st?.settled ? "true" : "false"}</div>
 
                   <div className="row">
-                    <button
-                      onClick={() => setActive(addr)}
-                      disabled={incompatible}
-                      className="btn"
-                    >
-                      Open
-                    </button>
+                    <button onClick={() => setActive(addr)} disabled={incompatible} className="btn">Open</button>
                     <a className="link" href={`https://sepolia.etherscan.io/address/${addr}`} target="_blank" rel="noreferrer">Etherscan</a>
-                    <code className="addr" title="Copy"
+                    <code
+                      className="addr"
+                      title="Copy"
                       onClick={() => navigator.clipboard?.writeText(addr).then(() => setToast("Đã copy địa chỉ hợp đồng."))}
                     >
                       {addr.slice(0, 8)}…{addr.slice(-6)}
@@ -607,16 +667,16 @@ export default function App() {
                   step={1}
                   value={bid}
                   onChange={(e) => setBid(e.target.value)}
-                  disabled={!detail || Number(detail?.endTime || 0) <= nowSec() || !!busy}
+                  disabled={!detail || Number(detail?.endTime || 0) <= nowSec() || !!busy || !fheReady}
                   className="input"
                 />
               </label>
               <button
                 type="submit"
-                disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec()}
+                disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec() || !fheReady}
                 className="btn btn--primary"
               >
-                {busy ? busy : "Submit encrypted bid"}
+                {busy ? busy : (fheReady ? "Submit encrypted bid" : "Waiting FHE key…")}
               </button>
             </form>
 
