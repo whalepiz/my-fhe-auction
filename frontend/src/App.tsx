@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { BrowserProvider, Contract, Fragment, Interface } from "ethers";
+import { BrowserProvider, Contract, Fragment, Interface, JsonRpcProvider } from "ethers";
 import { getFheInstance } from "./lib/fhe";
 import auctionAbiJson from "./abi/FHEAuction.json";
 import { AUCTIONS, CHAIN_ID } from "./config";
@@ -16,36 +16,46 @@ type AuctionStatus = {
   winningIndexEnc?: string;
 };
 
-function fmtTs(ts: bigint) {
+// ---- helpers ----
+function fmtTs(ts?: bigint) {
   if (!ts) return "-";
   const d = new Date(Number(ts) * 1000);
   return d.toLocaleString();
 }
 
-async function readStatus(addr: string, provider: any): Promise<AuctionStatus> {
-  const c = new Contract(addr, auctionAbi, provider);
-  // getStatus(): [string item, uint256 endTime, bool settled]
-  const [item, endTime, settled] = await c.getStatus();
-  const st: AuctionStatus = { item, endTime, settled };
-  if (settled) {
-    st.winningBidEnc = await c.winningBidEnc();
-    st.winningIndexEnc = await c.winningIndexEnc();
-  }
-  return st;
-}
-
-// Luôn có provider đọc-only về Sepolia nếu MetaMask không ở đúng chain
+// Provider chỉ-đọc: nếu MM ở Sepolia dùng luôn, nếu không dùng RPC công khai
 async function getReadOnlyProvider() {
   const anyWin = window as any;
   if (anyWin.ethereum) {
     const p = new BrowserProvider(anyWin.ethereum);
     try {
       const net = await p.getNetwork();
-      if (Number(net.chainId) === CHAIN_ID) return p; // MM đang ở Sepolia -> dùng luôn
+      if (Number(net.chainId) === CHAIN_ID) return p;
     } catch {}
   }
-  const { JsonRpcProvider } = await import("ethers");
   return new JsonRpcProvider("https://rpc.sepolia.org");
+}
+
+// Đọc trạng thái; nếu contract không đúng ABI → trả về null thay vì throw
+async function safeReadStatus(addr: string, provider: any): Promise<AuctionStatus | null> {
+  try {
+    const c = new Contract(addr, auctionAbi, provider);
+    const [item, endTime, settled] = await c.getStatus(); // string, uint256, bool
+    const st: AuctionStatus = { item, endTime, settled };
+    if (settled) {
+      st.winningBidEnc = await c.winningBidEnc();
+      st.winningIndexEnc = await c.winningIndexEnc();
+    }
+    return st;
+  } catch (e: any) {
+    // ethers v6: code BAD_DATA khi decode 0x (hàm không tồn tại)
+    if (e?.code === "BAD_DATA" || e?.value === "0x") {
+      console.warn(`Address ${addr} is not a compatible FHEAuction (getStatus missing).`);
+      return null;
+    }
+    console.error("safeReadStatus unexpected error:", e);
+    return null;
+  }
 }
 
 export default function App() {
@@ -107,9 +117,9 @@ export default function App() {
         setLoadingList(true);
         const provider = await getReadOnlyProvider();
         const entries = await Promise.all(
-          addresses.map(async (addr) => [addr, await readStatus(addr, provider)] as const)
+          addresses.map(async (addr) => [addr, await safeReadStatus(addr, provider)] as const)
         );
-        const map: Record<string, AuctionStatus> = {};
+        const map: Record<string, AuctionStatus | null> = {};
         for (const [addr, st] of entries) map[addr] = st;
         setListStatus(map);
       } catch (e) {
@@ -120,22 +130,17 @@ export default function App() {
     })();
   }, [addresses.join(",")]);
 
-  // —— UI trạng thái 1 auction đang active (tái dùng code cũ) ——
+  // —— UI trạng thái 1 auction đang active —— 
   const [bid, setBid] = useState("");
   const [busy, setBusy] = useState<null | string>(null);
   const [detail, setDetail] = useState<AuctionStatus | null>(null);
 
   async function refreshDetail() {
     if (!active) return;
-    try {
-      const provider = await getReadOnlyProvider();
-      const st = await readStatus(active, provider);
-      setDetail(st);
-      setListStatus((old) => ({ ...old, [active]: st }));
-    } catch (e) {
-      console.error("refreshStatus error:", e);
-      alert("refreshStatus: Error: could not decode result data");
-    }
+    const provider = await getReadOnlyProvider();
+    const st = await safeReadStatus(active, provider);
+    setDetail(st);
+    setListStatus((old) => ({ ...old, [active]: st }));
   }
 
   useEffect(() => {
@@ -146,6 +151,7 @@ export default function App() {
   async function submitBid(e: React.FormEvent) {
     e.preventDefault();
     if (!wallet.address) return alert("Connect wallet first");
+    if (!detail) return alert("This address is not a compatible FHEAuction.");
     if (!/^\d+$/.test(bid)) return alert("Bid must be a non-negative integer");
 
     const anyWin = window as any;
@@ -154,7 +160,6 @@ export default function App() {
     try {
       setBusy("Encrypting bid…");
 
-      // ensure correct chain
       const net = await provider.getNetwork();
       if (Number(net.chainId) !== CHAIN_ID) {
         await connect();
@@ -190,6 +195,8 @@ export default function App() {
 
   async function settleAndReveal() {
     if (!active) return;
+    if (!detail) return alert("This address is not a compatible FHEAuction.");
+
     try {
       const anyWin = window as any;
       if (!anyWin.ethereum) return alert("Connect wallet first");
@@ -205,13 +212,11 @@ export default function App() {
 
       if (!frag) throw new Error("Contract has no settle()");
 
-      // inspect settle signature
       const inputs = (frag as any).inputs ?? [];
       let tx;
       if (inputs.length === 0) {
         tx = await c.settle();
       } else if (inputs.length === 1 && inputs[0].type === "address[]") {
-        // chỉ truyền người gọi để “seed” danh sách — backend có thể tự gom thêm
         const me = await signer.getAddress();
         tx = await c.settle([me]);
       } else {
@@ -253,6 +258,7 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
           {(addresses.length ? addresses : [""]).map((addr) => {
             const st = listStatus[addr];
+            const incompatible = st === null;
             return (
               <div key={addr} style={{
                 border: "1px solid #e5e7eb",
@@ -261,16 +267,20 @@ export default function App() {
                 background: addr === active ? "#f5f5ff" : "white",
               }}>
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  {st?.item || "(unknown item)"}
+                  {incompatible ? "(incompatible contract)" : (st?.item || "(unknown item)")}
                 </div>
                 <div style={{ fontSize: 12, opacity: 0.8 }}>
-                  End: {st ? (Number(st.endTime) > Date.now()/1000 ? "ongoing" : "ended") : "-"} · {st ? fmtTs(st.endTime) : "-"}
+                  End: {incompatible ? "-" : (st ? (Number(st.endTime) > Date.now()/1000 ? "ongoing" : "ended") : "-")} · {st ? fmtTs(st.endTime) : "-"}
                 </div>
                 <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>
-                  Settled: {st?.settled ? "true" : "false"}
+                  Settled: {incompatible ? "-" : (st?.settled ? "true" : "false")}
                 </div>
                 <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                  <button onClick={() => setActive(addr)} style={{ padding: "6px 10px", borderRadius: 8 }}>
+                  <button
+                    onClick={() => setActive(addr)}
+                    disabled={incompatible}
+                    style={{ padding: "6px 10px", borderRadius: 8, opacity: incompatible ? 0.5 : 1 }}
+                  >
                     Open
                   </button>
                   <code style={{ fontSize: 11, opacity: 0.7 }}>{addr.slice(0, 8)}…{addr.slice(-6)}</code>
@@ -324,13 +334,13 @@ export default function App() {
                 style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
               />
             </label>
-            <button type="submit" disabled={!!busy} style={{ padding: "10px 16px", borderRadius: 8 }}>
+            <button type="submit" disabled={!!busy || !detail} style={{ padding: "10px 16px", borderRadius: 8 }}>
               {busy ? busy : "Submit encrypted bid"}
             </button>
           </form>
 
           <div style={{ marginTop: 12 }}>
-            <button onClick={settleAndReveal} style={{ padding: "8px 14px", borderRadius: 8 }}>
+            <button onClick={settleAndReveal} disabled={!detail} style={{ padding: "8px 14px", borderRadius: 8, opacity: !detail ? 0.5 : 1 }}>
               Settle & reveal
             </button>
           </div>
