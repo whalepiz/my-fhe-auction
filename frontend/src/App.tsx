@@ -9,7 +9,7 @@ import {
   JsonRpcProvider,
 } from "ethers";
 import { AUCTIONS, AUCTION_META, CHAIN_ID, RPCS } from "./config";
-import { encryptBidWithRetry, getFheInstance, waitForPublicKey, sleep } from "./lib/fhe";
+import { encryptBidWithRetry, waitForPublicKey, sleep } from "./lib/fhe";
 import auctionArtifact from "./abi/FHEAuction.json";
 
 /** ============ Ethers / ABI ============ */
