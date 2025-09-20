@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, type FormEvent } from "react";
+import React, { type FormEvent, useEffect, useMemo, useState } from "react";
 import {
   BrowserProvider,
   Contract,
@@ -11,12 +11,13 @@ import { getFheInstance } from "./lib/fhe";
 import auctionAbiJson from "./abi/FHEAuction.json";
 import { CHAIN_ID, AUCTIONS as ENV_AUCTIONS, AUCTION_META } from "./config";
 
-/* -------------------- ABI / Bytecode -------------------- */
+/** ---------- ABI / Bytecode ---------- */
 const auctionAbi = (auctionAbiJson as any).abi;
 const auctionBytecode: string | undefined = (auctionAbiJson as any)?.bytecode;
 
-/* -------------------- Types -------------------- */
+/** ---------- Types ---------- */
 type Wallet = { address: string | null; chainId: number | null };
+
 type AuctionStatus = {
   item: string;
   endTime: bigint;
@@ -25,7 +26,7 @@ type AuctionStatus = {
   winningIndexEnc?: string;
 };
 
-/* -------------------- Utils -------------------- */
+/** ---------- Utils ---------- */
 const RPCS = [
   "https://eth-sepolia.public.blastapi.io",
   "https://endpoints.omniatech.io/v1/eth/sepolia/public",
@@ -34,10 +35,15 @@ const RPCS = [
 ];
 
 const LS_KEY = "fhe_auctions";
-const nowSec = () => Math.floor(Date.now() / 1000);
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
-const fmtTs = (ts?: bigint) => (ts ? new Date(Number(ts) * 1000).toLocaleString() : "-");
+
+function fmtTs(ts?: bigint) {
+  if (!ts) return "-";
+  const d = new Date(Number(ts) * 1000);
+  return d.toLocaleString();
+}
+function nowSec() { return Math.floor(Date.now() / 1000); }
+function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
+function isAddress(s: string) { return /^0x[a-fA-F0-9]{40}$/.test(s); }
 function fmtRemain(s: number) {
   if (s <= 0) return "0s";
   const d = Math.floor(s / 86400);
@@ -50,7 +56,7 @@ function fmtRemain(s: number) {
   return `${sec}s`;
 }
 
-/* -------------------- Persist local auctions -------------------- */
+/** ---------- Persist local auction list ---------- */
 function loadLocalAddrs(): string[] {
   try {
     const raw = localStorage.getItem(LS_KEY);
@@ -72,14 +78,16 @@ function initialAddrList(): string[] {
   return Array.from(new Set([...env, ...ls]));
 }
 
-/* -------------------- Provider helpers -------------------- */
-async function tryProviders<T>(call: (p: BrowserProvider | JsonRpcProvider) => Promise<T>): Promise<T> {
+/** ---------- Provider helpers ---------- */
+async function tryProviders<T>(
+  call: (p: BrowserProvider | JsonRpcProvider) => Promise<T>
+): Promise<T> {
   let lastErr: any;
   for (const url of RPCS) {
     const p = new JsonRpcProvider(url);
     try {
       return await call(p);
-    } catch (e) {
+    } catch (e: any) {
       lastErr = e;
       continue;
     }
@@ -99,20 +107,12 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
       }
       return st;
     });
-  } catch (err: any) {
-    const msg = String(err?.message || err);
-    if (
-      err?.code === "BAD_DATA" ||
-      err?.value === "0x" ||
-      /bad data|invalid|selector|reverted/i.test(msg)
-    ) {
-      return null;
-    }
+  } catch {
     return null;
   }
 }
 
-/* -------------------- FHE helpers -------------------- */
+/** ---------- FHE helpers ---------- */
 async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
   try {
     const inst = await getFheInstance();
@@ -121,6 +121,7 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
       await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 120000 });
       return;
     }
+    // fallback loop
     for (let i = 1; i <= 8; i++) {
       try {
         setBusy?.(`Fetching FHE key… (try ${i}/8)`);
@@ -156,12 +157,13 @@ async function encryptBidWithRetry(
       const msg = String(err?.message || "");
       const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
       if (!retriable || i === 10) throw err;
-      await sleep(1000 * i);
+      await sleep(800 * i);
     }
   }
   throw new Error("FHE key not ready.");
 }
 
+/** Decode revert reason if possible */
 function decodeRevert(err: any): string | null {
   try {
     const data =
@@ -183,7 +185,28 @@ function decodeRevert(err: any): string | null {
   }
 }
 
-/* -------------------- Small UI -------------------- */
+/** ---------- NEW: Preflight on-chain (eth_call) ---------- */
+async function preflightOnchain(
+  signer: any,
+  contractAddr: string,
+  calldata: string,
+  setBusy?: (s: string | null) => void
+) {
+  for (let i = 1; i <= 20; i++) {
+    try {
+      setBusy?.(`Preflight… (try ${i}/20)`);
+      // Nếu không throw → OK để gửi thật
+      await signer.call({ to: contractAddr, data: calldata });
+      return;
+    } catch (e: any) {
+      // nếu revert → thường proof chưa đồng bộ, đợi rồi thử lại
+      await sleep(1000 + i * 250);
+    }
+  }
+  throw new Error("Preflight failed: execution reverted (unknown custom error)");
+}
+
+/** ---------- UI bits ---------- */
 function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: React.ReactNode }) {
   const bg =
     color === "green" ? "#103e2a" :
@@ -198,7 +221,7 @@ function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
-    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 320, zIndex: 50 }}>
+    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300, zIndex: 9999 }}>
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #1f2937", fontWeight: 600 }}>Thông báo</div>
       <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>{text}</div>
       <div style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}>
@@ -208,18 +231,18 @@ function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   );
 }
 
-/* ===================================================
- *                       APP
+/** ===================================================
+ *                     APP
  * =================================================== */
 export default function App() {
-  /* Wallet */
+  /** Wallet */
   const [wallet, setWallet] = useState<Wallet>({ address: null, chainId: null });
 
   async function connect() {
     const anyWin = window as any;
     if (!anyWin.ethereum) return alert("MetaMask not found");
-    const sepoliaHex = "0xaa36a7"; // 11155111
 
+    const sepoliaHex = "0xaa36a7"; // 11155111
     try {
       await anyWin.ethereum.request({
         method: "wallet_switchEthereumChain",
@@ -256,7 +279,7 @@ export default function App() {
     setWallet({ address: await signer.getAddress(), chainId: Number(net.chainId) });
   }
 
-  /* Auction list */
+  /** Auction list (persist) */
   const initialAddresses = useMemo(initialAddrList, []);
   const [addrList, setAddrList] = useState<string[]>(initialAddresses);
   const [active, setActive] = useState<string>(initialAddresses[0] ?? "");
@@ -284,7 +307,7 @@ export default function App() {
     })();
   }, [addrList.join(",")]);
 
-  /* Active detail */
+  /** Active detail */
   const [detail, setDetail] = useState<AuctionStatus | null>(null);
   const [bid, setBid] = useState("");
   const [busy, setBusy] = useState<null | string>(null);
@@ -297,79 +320,64 @@ export default function App() {
   }
   useEffect(() => { refreshDetail(); }, [active]);
 
-  /* Actions */
-async function submitBid(ev: FormEvent) {
-  ev.preventDefault();
-  if (!wallet.address) return setToast("Hãy kết nối ví trước.");
-  if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
-  if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
-  if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
+  /** Actions */
+  async function submitBid(ev: FormEvent) {
+    ev.preventDefault();
+    if (!wallet.address) return setToast("Hãy kết nối ví trước.");
+    if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
+    if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
+    if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
 
-  const val = BigInt(bid);
-  if (val > 0xffffffffn) return setToast("Bid vượt quá uint32.");
+    const anyWin = window as any;
+    const provider = new BrowserProvider(anyWin.ethereum);
 
-  const anyWin = window as any;
-  const provider = new BrowserProvider(anyWin.ethereum);
-
-  try {
-    const net = await provider.getNetwork();
-    if (Number(net.chainId) !== CHAIN_ID) await connect();
-    const signer = await provider.getSigner();
-    const me = await signer.getAddress();
-
-    // 1) đảm bảo public key (đợi tối đa ~120s, có hiển thị trạng thái)
-    await waitPublicKey(active, setBusy);
-
-    // 2) Encrypt + proof (có retry)
-    const enc = await encryptBidWithRetry(active, me, val, setBusy);
-
-    // 3) build calldata
-    const iface = new Interface(auctionAbi);
-    const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
-
-    // 4) PRE-FLIGHT (mô phỏng). Nếu thất bại -> chỉ CẢNH BÁO, vẫn cho gửi tx
-    setBusy("Preflight…");
     try {
-      await signer.call({ to: active, data }); // dùng signer => from = địa chỉ ví của bạn
-    } catch (e: any) {
-      const reason = decodeRevert(e) || e?.shortMessage || e?.message || "execution reverted";
-      console.warn("Preflight failed, will still send tx:", reason, e);
-      setToast("Preflight cảnh báo: " + reason + "\n→ Vẫn sẽ mở MetaMask để bạn gửi giao dịch.");
+      const net = await provider.getNetwork();
+      if (Number(net.chainId) !== CHAIN_ID) await connect();
+      const signer = await provider.getSigner();
+      const me = await signer.getAddress();
+
+      // 1) FHE public key
+      await waitPublicKey(active, setBusy);
+
+      // 2) Encrypt + retry
+      const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
+
+      // 3) Encode calldata
+      const iface = new Interface(auctionAbi);
+      const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
+
+      // 4) NEW: preflight on-chain until pass, rồi mới mở MetaMask
+      await preflightOnchain(signer, active, data, setBusy);
+
+      // 5) Ước lượng gas và gửi thật
+      setBusy("Sending transaction…");
+      let gasLimit = 1_200_000n;
+      try {
+        const est = await signer.estimateGas({ to: active, data });
+        if (est && est > 0n) gasLimit = est + (est / 5n);
+      } catch {}
+      const tx = await signer.sendTransaction({ to: active, data, gasLimit });
+      await tx.wait();
+
+      setToast(`Đã gửi bid (encrypted) = ${bid}`);
+      setBid("");
+      await refreshDetail();
+    } catch (err: any) {
+      const decoded = decodeRevert(err);
+      const base =
+        err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
+      const reason = decoded ? ` | Revert: ${decoded}` : "";
+      const txHash =
+        err?.transactionHash ||
+        err?.receipt?.transactionHash ||
+        err?.hash || "";
+      const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
+      setToast("Bid thất bại: " + base + reason + link);
     } finally {
       setBusy(null);
     }
-
-    // 5) Ước lượng gas (mềm) để tránh under-estimate
-    let gasLimit = 1_200_000n;
-    try {
-      const est = await signer.estimateGas({ to: active, data });
-      if (est && est > 0n) gasLimit = est + (est / 5n);
-    } catch { /* bỏ qua, dùng mặc định */ }
-
-    // 6) GỬI GIAO DỊCH (luôn mở MetaMask, kể cả preflight fail)
-    setBusy("Sending transaction…");
-    const tx = await signer.sendTransaction({ to: active, data, gasLimit });
-    await tx.wait();
-
-    setToast(`Đã gửi bid (encrypted) = ${bid}`);
-    setBid("");
-    await refreshDetail();
-  } catch (err: any) {
-    const decoded = decodeRevert(err);
-    const base =
-      err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
-    const reason = decoded ? ` | Revert: ${decoded}` : "";
-    const txHash =
-      err?.transactionHash ||
-      err?.receipt?.transactionHash ||
-      err?.hash || "";
-    const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
-    setToast("Bid thất bại: " + base + reason + link);
-  } finally {
-    setBusy(null);
   }
-}
-
 
   async function settleAndReveal() {
     if (!active) return;
@@ -408,6 +416,7 @@ async function submitBid(ev: FormEvent) {
   async function createAuction(name: string, minutes: number) {
     if (!wallet.address) return setToast("Kết nối ví trước.");
     const secs = Math.max(60, Math.floor(Number(minutes) * 60));
+
     try {
       const anyWin = window as any;
       const provider = new BrowserProvider(anyWin.ethereum);
@@ -416,7 +425,9 @@ async function submitBid(ev: FormEvent) {
       const signer = await provider.getSigner();
 
       if (!auctionBytecode) {
-        return setToast("Thiếu bytecode trong FHEAuction.json (artifact Hardhat).");
+        return setToast(
+          "Thiếu bytecode trong FHEAuction.json. Hãy dùng artifact Hardhat (có bytecode)."
+        );
       }
 
       const factory = new ContractFactory(auctionAbi, auctionBytecode, signer);
@@ -430,19 +441,20 @@ async function submitBid(ev: FormEvent) {
       setAddrList(next);
       setActive(newAddr);
       await refreshDetail();
-      waitPublicKey(newAddr, setBusy).catch(() => {});
     } catch (err: any) {
       const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       setToast("Deploy thất bại: " + msg);
     }
   }
 
-  /* Quick create (header) */
+  /** ---------- Simple quick create UI (header button) ---------- */
   const [creating, setCreating] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [newMinutes, setNewMinutes] = useState(10);
 
-  /* Render */
+  /** ---------- Render ---------- */
+  const ended = detail ? Number(detail.endTime) <= nowSec() : false;
+
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -621,3 +633,4 @@ async function submitBid(ev: FormEvent) {
     </div>
   );
 }
+
