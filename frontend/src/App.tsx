@@ -35,7 +35,6 @@ const RPCS = [
 
 const LS_KEY = "fhe_auctions";
 const nowSec = () => Math.floor(Date.now() / 1000);
-const nowMs = () => Date.now();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
 const fmtTs = (ts?: bigint) => (ts ? new Date(Number(ts) * 1000).toLocaleString() : "-");
@@ -107,7 +106,6 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
       err?.value === "0x" ||
       /bad data|invalid|selector|reverted/i.test(msg)
     ) {
-      // getStatus() không decode được → contract không tương thích
       return null;
     }
     return null;
@@ -137,23 +135,6 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
     }
   } finally {
     setBusy?.(null);
-  }
-}
-
-async function isFheReady(contractAddr: string): Promise<boolean> {
-  try {
-    const inst = await getFheInstance();
-    if ((inst as any)?.waitForPublicKey) {
-      await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 1 });
-      return true;
-    }
-    if ((inst as any)?.getPublicKey) {
-      await (inst as any).getPublicKey(contractAddr);
-      return true;
-    }
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -316,26 +297,6 @@ export default function App() {
   }
   useEffect(() => { refreshDetail(); }, [active]);
 
-  /* FHE readiness UI (chỉ hiển thị) */
-  const [fheReady, setFheReady] = useState<boolean>(false);
-  const [fheReadySince, setFheReadySince] = useState<number | null>(null);
-  useEffect(() => {
-    let stop = false;
-    async function tick() {
-      if (!active) return;
-      const ok = await isFheReady(active);
-      if (stop) return;
-      setFheReady((prev) => {
-        if (!prev && ok) setFheReadySince(nowMs());
-        if (!ok) setFheReadySince(null);
-        return ok;
-      });
-    }
-    tick();
-    const id = setInterval(tick, 2000);
-    return () => { stop = true; clearInterval(id); };
-  }, [active]);
-
   /* Actions */
   async function submitBid(ev: FormEvent) {
     ev.preventDefault();
@@ -370,8 +331,7 @@ export default function App() {
       setBusy("Preflight…");
       const cRW = new Contract(active, auctionAbi, signer);
       try {
-        // v6: staticCall
-        // @ts-ignore
+        // @ts-ignore v6 staticCall
         await cRW.bid.staticCall(enc.handles[0], enc.inputProof);
       } catch (e: any) {
         const reason = decodeRevert(e) || e?.shortMessage || e?.message || "execution reverted";
@@ -468,7 +428,6 @@ export default function App() {
       const next = Array.from(new Set([newAddr, ...addrList]));
       setAddrList(next);
       setActive(newAddr);
-      // tự refresh và warm key cho auction mới
       await refreshDetail();
       waitPublicKey(newAddr, setBusy).catch(() => {});
     } catch (err: any) {
