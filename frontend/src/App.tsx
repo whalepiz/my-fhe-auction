@@ -1,6 +1,5 @@
 // frontend/src/App.tsx
-import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import {
   BrowserProvider,
   Contract,
@@ -13,11 +12,9 @@ import { getFheInstance } from "./lib/fhe";
 import auctionAbiJson from "./abi/FHEAuction.json";
 import { CHAIN_ID, AUCTIONS as ENV_AUCTIONS } from "./config";
 
-/** ---------- ABI / Bytecode ---------- */
 const auctionAbi = (auctionAbiJson as any).abi;
 const auctionBytecode: string | undefined = (auctionAbiJson as any)?.bytecode;
 
-/** ---------- Types ---------- */
 type Wallet = { address: string | null; chainId: number | null };
 
 type AuctionStatus = {
@@ -28,12 +25,10 @@ type AuctionStatus = {
   winningIndexEnc?: string;
 };
 
-/** ---------- Utils ---------- */
 const RPCS = [
-  "https://rpc.sepolia.org",
+  "https://ethereum-sepolia.publicnode.com",
   "https://eth-sepolia.public.blastapi.io",
   "https://endpoints.omniatech.io/v1/eth/sepolia/public",
-  "https://ethereum-sepolia.publicnode.com",
 ];
 
 const LS_KEY = "fhe_auctions";
@@ -43,11 +38,17 @@ function fmtTs(ts?: bigint) {
   const d = new Date(Number(ts) * 1000);
   return d.toLocaleString();
 }
-function nowSec() { return Math.floor(Date.now() / 1000); }
-function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
-function isAddress(s: string) { return /^0x[a-fA-F0-9]{40}$/.test(s); }
+const nowSec = () => Math.floor(Date.now() / 1000);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
+function fmtRemain(s: number) {
+  if (s <= 0) return "0s";
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
 
-/** ---------- Persist list ---------- */
 function loadLocalAddrs(): string[] {
   try {
     const raw = localStorage.getItem(LS_KEY);
@@ -55,7 +56,9 @@ function loadLocalAddrs(): string[] {
     const arr = JSON.parse(raw);
     if (!Array.isArray(arr)) return [];
     return arr.filter((x: any) => typeof x === "string" && isAddress(x));
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 function saveLocalAddrs(addrs: string[]) {
   const uniq = Array.from(new Set(addrs.filter(isAddress)));
@@ -67,7 +70,6 @@ function initialAddrList(): string[] {
   return Array.from(new Set([...env, ...ls]));
 }
 
-/** ---------- Provider helpers ---------- */
 async function tryProviders<T>(
   call: (p: BrowserProvider | JsonRpcProvider) => Promise<T>
 ): Promise<T> {
@@ -76,9 +78,8 @@ async function tryProviders<T>(
     const p = new JsonRpcProvider(url);
     try {
       return await call(p);
-    } catch (e: any) {
+    } catch (e) {
       lastErr = e;
-      continue;
     }
   }
   throw lastErr ?? new Error("All providers failed");
@@ -101,77 +102,10 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
   }
 }
 
-/** ---------- FHE helpers ---------- */
-async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
-  const inst = await getFheInstance();
-  setBusy?.("Chuẩn bị public key FHE…");
-  for (let i = 1; i <= 10; i++) {
-    try {
-      if ((inst as any).waitForPublicKey) {
-        await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 7000 });
-      } else if ((inst as any).getPublicKey) {
-        await (inst as any).getPublicKey(contractAddr);
-      }
-      setBusy?.(null);
-      return;
-    } catch {
-      await sleep(1000 * i);
-    }
-  }
-  setBusy?.(null);
-  throw new Error("Public key chưa sẵn sàng");
-}
-
-async function encryptBid(
-  contractAddr: string,
-  signerAddr: string,
-  value: bigint,
-  setBusy?: (s: string | null) => void
-) {
-  const inst = await getFheInstance();
-  for (let i = 1; i <= 8; i++) {
-    try {
-      setBusy?.(`Encrypting… (lần ${i}/8)`);
-      const buf = inst.createEncryptedInput(contractAddr, signerAddr);
-      buf.add32(value);
-      const enc = await buf.encrypt();
-      setBusy?.(null);
-      return enc;
-    } catch (err: any) {
-      const msg = String(err?.message || "");
-      if (!/500|timeout|failed|public key|gateway|relayer/i.test(msg) || i === 8) {
-        setBusy?.(null);
-        throw err;
-      }
-      await sleep(800 * i);
-    }
-  }
-  setBusy?.(null);
-  throw new Error("Encrypt thất bại");
-}
-
-function decodeRevert(err: any): string | null {
-  try {
-    const data =
-      err?.data?.data ||
-      err?.error?.data ||
-      err?.error?.error?.data ||
-      err?.info?.error?.data ||
-      err?.data ||
-      null;
-    if (!data) return null;
-    const iface = new Interface(auctionAbi);
-    const parsed = iface.parseError(data);
-    if (!parsed) return null;
-    return parsed.name;
-  } catch { return null; }
-}
-
-/** ---------- UI ---------- */
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
-    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300 }}>
+    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 320, zIndex: 9999 }}>
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #1f2937", fontWeight: 600 }}>Thông báo</div>
       <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>{text}</div>
       <div style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}>
@@ -181,15 +115,13 @@ function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   );
 }
 
-/** ===================================================
- *                     APP
- * =================================================== */
 export default function App() {
   const [wallet, setWallet] = useState<Wallet>({ address: null, chainId: null });
+  const [toast, setToast] = useState("");
 
   async function connect() {
     const anyWin = window as any;
-    if (!anyWin.ethereum) return alert("MetaMask not found");
+    if (!anyWin.ethereum) return setToast("Không tìm thấy MetaMask.");
 
     const sepoliaHex = "0xaa36a7";
     try {
@@ -211,13 +143,8 @@ export default function App() {
             },
           ],
         });
-        await anyWin.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: sepoliaHex }],
-        });
       } else {
-        alert(`Hãy chuyển MetaMask sang Sepolia (chainId ${CHAIN_ID}).`);
-        return;
+        return setToast("Hãy chuyển MetaMask sang Sepolia.");
       }
     }
 
@@ -228,12 +155,11 @@ export default function App() {
     setWallet({ address: await signer.getAddress(), chainId: Number(net.chainId) });
   }
 
-  const addresses: string[] = useMemo(initialAddrList, []);
-  const [addrList, setAddrList] = useState<string[]>(addresses);
-  const [active, setActive] = useState<string>(addresses[0] ?? "");
+  const initialAddresses = useMemo(initialAddrList, []);
+  const [addrList, setAddrList] = useState<string[]>(initialAddresses);
+  const [active, setActive] = useState<string>(initialAddresses[0] ?? "");
   const [listStatus, setListStatus] = useState<Record<string, AuctionStatus | null>>({});
   const [loadingList, setLoadingList] = useState(false);
-  const [toast, setToast] = useState("");
 
   useEffect(() => { saveLocalAddrs(addrList); }, [addrList]);
 
@@ -249,9 +175,7 @@ export default function App() {
           map[addr] = res.status === "fulfilled" ? res.value : null;
         });
         setListStatus(map);
-      } finally {
-        setLoadingList(false);
-      }
+      } finally { setLoadingList(false); }
     })();
   }, [addrList.join(",")]);
 
@@ -267,9 +191,26 @@ export default function App() {
   }
   useEffect(() => { refreshDetail(); }, [active]);
 
-  /** --------- SUBMIT BID ---------- */
-  async function submitBid(e: FormEvent) {
-    e.preventDefault();
+  // làm ấm public key (không chặn UI)
+  useEffect(() => {
+    let stop = false;
+    (async () => {
+      if (!active) return;
+      try {
+        const inst = await getFheInstance();
+        // nếu SDK có API waitForPublicKey thì gọi, nếu không thì getPublicKey
+        // @ts-ignore
+        if (inst.waitForPublicKey) await inst.waitForPublicKey(active, { timeoutMs: 1 });
+        // @ts-ignore
+        else if (inst.getPublicKey) await inst.getPublicKey(active);
+      } catch {}
+      if (stop) return;
+    })();
+    return () => { stop = true; };
+  }, [active]);
+
+  async function submitBid(ev: FormEvent) {
+    ev.preventDefault();
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
@@ -278,74 +219,39 @@ export default function App() {
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
 
-    const sendOnce = async () => {
+    try {
       const net = await provider.getNetwork();
       if (Number(net.chainId) !== CHAIN_ID) await connect();
-
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 1) Key
-      await waitPublicKey(active, setBusy);
+      setBusy("Encrypting…");
+      const inst = await getFheInstance();
+      const buf = inst.createEncryptedInput(active, me);
+      buf.add32(BigInt(bid));
+      const enc = await buf.encrypt(); // SDK sẽ gọi Gateway
 
-      // 2) Encrypt 1 + calldata
-      const enc1 = await encryptBid(active, me, BigInt(bid), setBusy);
-      const iface = new Interface(auctionAbi);
-      const data1 = iface.encodeFunctionData("bid", [enc1.handles[0], enc1.inputProof]);
-
-      // 3) Preflight (ép from = me)
-      setBusy("Preflight…");
-      try {
-        await (provider as any).send("eth_call", [{ to: active, from: me, data: data1 }, "latest"]);
-      } catch (err: any) {
-        const decoded = decodeRevert(err);
-        const base = err?.shortMessage || err?.message || "execution reverted";
-        const reason = decoded ? ` | Revert: ${decoded}` : "";
-        setBusy(null);
-        throw new Error("Preflight failed: " + base + reason);
-      }
-
-      // 4) Encrypt 2 + gửi tx (MetaMask chắc chắn mở)
-      const enc2 = await encryptBid(active, me, BigInt(bid), setBusy);
-      const data2 = iface.encodeFunctionData("bid", [enc2.handles[0], enc2.inputProof]);
-
+      // Gửi thẳng (không preflight, đặt gasLimit thủ công để ethers không estimate)
       setBusy("Sending transaction…");
-      let gasLimit = 1_200_000n;
-      try {
-        const est = await (signer as any).estimateGas({ to: active, data: data2 });
-        if (est && est > 0n) gasLimit = est + est / 5n;
-      } catch {}
-      const tx = await signer.sendTransaction({ to: active, data: data2, gasLimit });
-      await tx.wait();
-    };
+      const iface = new Interface(auctionAbi);
+      const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-    try {
-      await sendOnce();
+      const tx = await signer.sendTransaction({
+        to: active,
+        data,
+        gasLimit: 1_200_000n, // dư dả, tránh estimateGas
+      });
+
+      await tx.wait();
       setToast(`Đã gửi bid (encrypted) = ${bid}`);
       setBid("");
       await refreshDetail();
     } catch (err: any) {
-      const msg = String(err?.message || "");
-      if (/Preflight failed|proof|PublicKey|execution reverted|unknown/i.test(msg)) {
-        try {
-          setBusy("Retry with fresh proof…");
-          await sendOnce();
-          setToast(`Đã gửi bid (retry) = ${bid}`);
-          setBid("");
-          await refreshDetail();
-          return;
-        } catch (err2: any) {
-          const decoded = decodeRevert(err2);
-          const base = err2?.shortMessage || err2?.message || "Unknown error";
-          const reason = decoded ? ` | Revert: ${decoded}` : "";
-          setToast("Bid thất bại: " + base + reason);
-        } finally {
-          setBusy(null);
-        }
-      } else {
-        setToast("Bid thất bại: " + msg);
-        setBusy(null);
-      }
+      const base =
+        err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
+      setToast("Bid thất bại: " + base);
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -367,27 +273,29 @@ export default function App() {
 
       const inputs = (frag as any).inputs ?? [];
       let tx;
-      if (inputs.length === 1 && inputs[0].type === "address[]") {
+      if (inputs.length === 0) tx = await c.settle();
+      else if (inputs.length === 1 && inputs[0].type === "address[]") {
         const me = await signer.getAddress();
-        tx = await (c as any).settle([me]);
-      } else if (inputs.length === 0) {
-        tx = await (c as any).settle();
+        tx = await c.settle([me]);
       } else {
-        throw new Error(`Unsupported settle signature`);
+        throw new Error(`Unsupported settle signature: ${(frag as any).format("full")}`);
       }
       await tx.wait();
       setToast("Đã settle. Ciphertexts đã hiển thị.");
       await refreshDetail();
     } catch (err: any) {
-      const msg = err?.shortMessage || err?.message || "Unknown error";
+      const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       setToast("Settle thất bại: " + msg);
     }
   }
 
-  async function createAuction(name: string, minutes: number) {
-    if (!wallet.address) return setToast("Kết nối ví trước.");
-    const secs = Math.max(60, Math.floor(Number(minutes) * 60));
+  const [newItem, setNewItem] = useState("Test");
+  const [newMinutes, setNewMinutes] = useState(10);
+  const [creating, setCreating] = useState(false);
 
+  async function createAuction() {
+    if (!wallet.address) return setToast("Kết nối ví trước.");
+    const secs = Math.max(60, Math.floor(Number(newMinutes) * 60));
     try {
       const anyWin = window as any;
       const provider = new BrowserProvider(anyWin.ethereum);
@@ -395,30 +303,26 @@ export default function App() {
       if (Number(net.chainId) !== CHAIN_ID) await connect();
       const signer = await provider.getSigner();
 
-      if (!auctionBytecode) {
-        return setToast("Thiếu bytecode trong FHEAuction.json (artifact Hardhat).");
-      }
+      if (!auctionBytecode) return setToast("Thiếu bytecode trong FHEAuction.json.");
 
       const factory = new ContractFactory(auctionAbi, auctionBytecode, signer);
-      const c = await factory.deploy(name.trim(), secs);
+      const c = await factory.deploy(newItem.trim(), secs);
       await c.waitForDeployment();
-      // @ts-ignore v6
-      const newAddr: string = c.target;
+      // @ts-ignore ethers v6
+      const addr: string = c.target;
 
-      setToast(`Deploy thành công: ${newAddr}`);
-      const next = Array.from(new Set([newAddr, ...addrList]));
+      setToast(`Deploy thành công: ${addr}`);
+      const next = Array.from(new Set([addr, ...addrList]));
       setAddrList(next);
-      setActive(newAddr);
+      setActive(addr);
       await refreshDetail();
     } catch (err: any) {
-      const msg = err?.shortMessage || err?.message || "Unknown error";
+      const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       setToast("Deploy thất bại: " + msg);
+    } finally {
+      setCreating(false);
     }
   }
-
-  const [creating, setCreating] = useState(false);
-  const [newItem, setNewItem] = useState("");
-  const [newMinutes, setNewMinutes] = useState(10);
 
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
@@ -442,12 +346,7 @@ export default function App() {
             style={{ width: 90, padding: "6px 8px", borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }}
           />
           <button
-            onClick={async () => {
-              if (!newItem.trim()) return setToast("Nhập tên item.");
-              setCreating(true);
-              try { await createAuction(newItem, newMinutes); }
-              finally { setCreating(false); }
-            }}
+            onClick={() => { setCreating(true); createAuction(); }}
             disabled={creating}
             style={{ padding: "6px 10px", borderRadius: 8, background: "#2563eb", color: "white" }}
           >
@@ -475,7 +374,7 @@ export default function App() {
               const st = listStatus[addr];
               const incompatible = st === null;
               const isActive = addr === active;
-              const endedCard = st ? Number(st.endTime) <= nowSec() : false;
+              const ended = st ? Number(st.endTime) <= nowSec() : false;
 
               return (
                 <div
@@ -492,15 +391,19 @@ export default function App() {
                       {st === undefined ? "loading…" : incompatible ? "(incompatible)" : st?.item || "(unknown)"}
                     </div>
                     {st && (
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>
-                        {!st.settled && !endedCard ? "Ongoing" : (!st.settled && endedCard ? "Ended" : "Settled")}
+                      <div>
+                        {!st.settled && !ended && <span style={{ fontSize: 12, color: "#50e3a4" }}>Ongoing</span>}
+                        {!st.settled && ended && <span style={{ fontSize: 12, color: "#ffca70" }}>Ended</span>}
+                        {st.settled && <span style={{ fontSize: 12, color: "#75a7ff" }}>Settled</span>}
                       </div>
                     )}
                   </div>
 
                   <div style={{ fontSize: 12, opacity: 0.8 }}>
-                    End: {incompatible ? "-" : st ? fmtTs(st.endTime) : "-"}
+                    End: {incompatible ? "-" : st ? (Number(st.endTime) > nowSec() ? "ongoing" : "ended") : "-"} · {st ? fmtTs(st.endTime) : "-"}
+                    {st && Number(st.endTime) > nowSec() && <> · <b>{fmtRemain(Number(st.endTime) - nowSec())}</b></>}
                   </div>
+                  <div style={{ fontSize: 12, opacity: 0.8 }}>Settled: {incompatible ? "-" : st?.settled ? "true" : "false"}</div>
 
                   <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
                     <button onClick={() => setActive(addr)} disabled={incompatible} style={{ padding: "6px 10px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}>
@@ -532,7 +435,12 @@ export default function App() {
 
             <div style={{ padding: 14, display: "grid", gap: 8 }}>
               <div><b>Item:</b> {detail?.item ?? "-"}</div>
-              <div><b>End time:</b> {detail ? fmtTs(detail.endTime) : "-"}</div>
+              <div>
+                <b>End time:</b> {detail ? fmtTs(detail.endTime) : "-"} ·{" "}
+                {detail ? (Number(detail.endTime) > nowSec()
+                  ? <>ongoing · <b>{fmtRemain(Number(detail.endTime) - nowSec())}</b></>
+                  : "ended") : "-"}
+              </div>
               <div><b>Settled:</b> {detail?.settled ? "true" : "false"}</div>
 
               <form onSubmit={submitBid} style={{ display: "grid", gap: 10, maxWidth: 520, marginTop: 8 }}>
@@ -553,7 +461,7 @@ export default function App() {
                   disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec()}
                   style={{ padding: "10px 16px", borderRadius: 8, background: "#2563eb", color: "white" }}
                 >
-                  {busy ?? "Submit encrypted bid"}
+                  {busy ? busy : "Submit encrypted bid"}
                 </button>
               </form>
 

@@ -1,19 +1,23 @@
 // frontend/src/lib/fhe.ts
-import { createInstance } from "@fhevm/sdk";
+import { createInstance, type FhevmInstance } from "@fhevm/sdk";
+import { CHAIN_ID } from "../config";
 
-let _inst: Promise<any> | null = null;
+// Chọn RPC có CORS (SDK sẽ fetch trực tiếp)
+const NETWORK_URL = "https://ethereum-sepolia.publicnode.com";
+// Gateway testnet của Zama
+const GATEWAY_URL = "https://gateway.testnet.zama.ai";
 
-/**
- * Khởi tạo 1 lần cho toàn app (Sepolia + gateway/relayer testnet).
- */
-export function getFheInstance() {
-  if (!_inst) {
-    _inst = createInstance({
-      chainId: 11155111, // Sepolia
-      rpcUrl: "https://rpc.sepolia.org",
-      gatewayUrl: "https://gateway.testnet.zama.ai",
-      relayerUrl: "https://relayer.testnet.zama.ai",
-    });
-  }
-  return _inst;
+let instance: FhevmInstance | null = null;
+
+/** Lấy (hoặc khởi tạo) instance SDK FHEVM */
+export async function getFheInstance(): Promise<FhevmInstance> {
+  if (instance) return instance;
+
+  instance = await createInstance({
+    chainId: CHAIN_ID,
+    networkUrl: NETWORK_URL,   // ✅ SDK mới dùng "networkUrl" (không còn rpcUrl)
+    gatewayUrl: GATEWAY_URL,
+  });
+
+  return instance;
 }
