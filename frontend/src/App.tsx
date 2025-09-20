@@ -298,75 +298,78 @@ export default function App() {
   useEffect(() => { refreshDetail(); }, [active]);
 
   /* Actions */
-  async function submitBid(ev: FormEvent) {
-    ev.preventDefault();
-    if (!wallet.address) return setToast("Hãy kết nối ví trước.");
-    if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
-    if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
-    if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
+async function submitBid(ev: FormEvent) {
+  ev.preventDefault();
+  if (!wallet.address) return setToast("Hãy kết nối ví trước.");
+  if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
+  if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
+  if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
 
-    const val = BigInt(bid);
-    if (val > 0xffffffffn) return setToast("Bid vượt quá uint32.");
+  const val = BigInt(bid);
+  if (val > 0xffffffffn) return setToast("Bid vượt quá uint32.");
 
-    const anyWin = window as any;
-    const provider = new BrowserProvider(anyWin.ethereum);
+  const anyWin = window as any;
+  const provider = new BrowserProvider(anyWin.ethereum);
 
+  try {
+    const net = await provider.getNetwork();
+    if (Number(net.chainId) !== CHAIN_ID) await connect();
+    const signer = await provider.getSigner();
+    const me = await signer.getAddress();
+
+    // 1) đảm bảo public key (đợi tối đa ~120s, có hiển thị trạng thái)
+    await waitPublicKey(active, setBusy);
+
+    // 2) Encrypt + proof (có retry)
+    const enc = await encryptBidWithRetry(active, me, val, setBusy);
+
+    // 3) build calldata
+    const iface = new Interface(auctionAbi);
+    const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
+
+    // 4) PRE-FLIGHT (mô phỏng). Nếu thất bại -> chỉ CẢNH BÁO, vẫn cho gửi tx
+    setBusy("Preflight…");
     try {
-      const net = await provider.getNetwork();
-      if (Number(net.chainId) !== CHAIN_ID) await connect();
-      const signer = await provider.getSigner();
-      const me = await signer.getAddress();
-
-      // 1) đảm bảo key
-      await waitPublicKey(active, setBusy);
-
-      // 2) encrypt + proof (retry)
-      const enc = await encryptBidWithRetry(active, me, val, setBusy);
-
-      // 3) build calldata
-      const iface = new Interface(auctionAbi);
-      const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
-
-      // 4) PRE-FLIGHT bằng signer.call (mô phỏng đúng msg.sender)
-      setBusy("Preflight…");
-      try {
-        await signer.call({ to: active, data }); // dùng địa chỉ signer làm `from`
-      } catch (e: any) {
-        const reason = decodeRevert(e) || e?.shortMessage || e?.message || "execution reverted";
-        setBusy(null);
-        return setToast("Preflight failed: " + reason + "\n(Mẹo: nếu liên quan key/proof hãy thử lại sau 20–60s.)");
-      }
-
-      // 5) estimate gas (mềm)
-      let gasLimit = 1_200_000n;
-      try {
-        const est = await signer.estimateGas({ to: active, data });
-        if (est && est > 0n) gasLimit = est + (est / 5n);
-      } catch { /* ignore */ }
-
-      // 6) gửi tx
-      setBusy("Sending transaction…");
-      const tx = await signer.sendTransaction({ to: active, data, gasLimit });
-      await tx.wait();
-
-      setToast(`Đã gửi bid (encrypted) = ${bid}`);
-      setBid("");
-      await refreshDetail();
-    } catch (err: any) {
-      const decoded = decodeRevert(err);
-      const base =
-        err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
-      const reason = decoded ? ` | Revert: ${decoded}` : "";
-      const txHash =
-        err?.transactionHash ||
-        err?.receipt?.transactionHash ||
-        err?.hash || "";
-      const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
-      setToast("Bid thất bại: " + base + reason + link);
+      await signer.call({ to: active, data }); // dùng signer => from = địa chỉ ví của bạn
+    } catch (e: any) {
+      const reason = decodeRevert(e) || e?.shortMessage || e?.message || "execution reverted";
+      console.warn("Preflight failed, will still send tx:", reason, e);
+      setToast("Preflight cảnh báo: " + reason + "\n→ Vẫn sẽ mở MetaMask để bạn gửi giao dịch.");
     } finally {
       setBusy(null);
     }
+
+    // 5) Ước lượng gas (mềm) để tránh under-estimate
+    let gasLimit = 1_200_000n;
+    try {
+      const est = await signer.estimateGas({ to: active, data });
+      if (est && est > 0n) gasLimit = est + (est / 5n);
+    } catch { /* bỏ qua, dùng mặc định */ }
+
+    // 6) GỬI GIAO DỊCH (luôn mở MetaMask, kể cả preflight fail)
+    setBusy("Sending transaction…");
+    const tx = await signer.sendTransaction({ to: active, data, gasLimit });
+    await tx.wait();
+
+    setToast(`Đã gửi bid (encrypted) = ${bid}`);
+    setBid("");
+    await refreshDetail();
+  } catch (err: any) {
+    const decoded = decodeRevert(err);
+    const base =
+      err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
+    const reason = decoded ? ` | Revert: ${decoded}` : "";
+    const txHash =
+      err?.transactionHash ||
+      err?.receipt?.transactionHash ||
+      err?.hash || "";
+    const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
+    setToast("Bid thất bại: " + base + reason + link);
+  } finally {
+    setBusy(null);
   }
+}
+
 
   async function settleAndReveal() {
     if (!active) return;
