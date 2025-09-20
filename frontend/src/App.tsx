@@ -33,6 +33,7 @@ const RPCS = [
   "https://rpc2.sepolia.org",
 ];
 
+const PREFLIGHT = (import.meta as any).env?.VITE_PREFLIGHT === "1"; // tắt mặc định
 const LS_KEY = "fhe_auctions";
 
 function fmtTs(ts?: bigint) {
@@ -41,7 +42,6 @@ function fmtTs(ts?: bigint) {
   return d.toLocaleString();
 }
 const nowSec = () => Math.floor(Date.now() / 1000);
-const nowMs = () => Date.now();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
 function fmtRemain(s: number) {
@@ -116,21 +116,23 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
 async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
   try {
     const inst = await getFheInstance();
+    // Nhiều SDK có waitForPublicKey -> dùng nếu có
     if ((inst as any)?.waitForPublicKey) {
       setBusy?.("Preparing FHE key…");
-      await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 120000 });
+      await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 60000 });
       return;
     }
-    for (let i = 1; i <= 8; i++) {
+    // Fallback: chọc getPublicKey vài lần
+    for (let i = 1; i <= 5; i++) {
       try {
-        setBusy?.(`Fetching FHE key… (try ${i}/8)`);
+        setBusy?.(`Fetching FHE key… (try ${i}/5)`);
         if ((inst as any)?.getPublicKey) {
           await (inst as any).getPublicKey(contractAddr);
           return;
         }
         break;
       } catch {
-        await sleep(1500 * i);
+        await sleep(800 * i);
       }
     }
   } finally {
@@ -160,18 +162,18 @@ async function encryptBidWithRetry(
   setBusy?: (s: string | null) => void
 ) {
   const inst = await getFheInstance();
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 6; i++) {
     try {
-      setBusy?.(`Encrypting (try ${i}/10)…`);
+      setBusy?.(`Encrypting (try ${i}/6)…`);
       const buf = inst.createEncryptedInput(contractAddr, signerAddr);
       buf.add32(value);
-      const enc = await buf.encrypt();
+      const enc = await buf.encrypt(); // gọi relayer để nhận inputProof
       return enc;
     } catch (err: any) {
       const msg = String(err?.message || "");
       const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
-      if (!retriable || i === 10) throw err;
-      await sleep(1000 * i);
+      if (!retriable || i === 6) throw err;
+      await sleep(900 * i);
     }
   }
   throw new Error("FHE key not ready.");
@@ -197,28 +199,30 @@ function decodeRevert(err: any): string | null {
   }
 }
 
-/** ---------- Preflight simulate (eth_call) ---------- */
-async function preflightBid(
+/** ---------- Quick preflight (best-effort, không chặn gửi) ---------- */
+async function quickPreflight(
   to: string,
   data: string,
   from: string,
   setBusy?: (s: string | null) => void
 ) {
-  for (let i = 1; i <= 30; i++) { // ~45s
-    setBusy?.(`Preflight… (try ${i}/30)`);
+  if (!PREFLIGHT) return true; // tắt mặc định
+  for (let i = 1; i <= 3; i++) {
+    setBusy?.(`Preflight… (try ${i}/3)`);
     for (const url of RPCS) {
       try {
         const p = new JsonRpcProvider(url);
-        await p.call({ to, data, from }); // succeed => không throw
+        await p.call({ to, data, from });
         setBusy?.(null);
-        return;
+        return true;
       } catch {
-        // thử RPC khác
+        // nếu RPC/eth_call fail vẫn thử cái khác
       }
     }
-    await sleep(1500);
+    await sleep(700);
   }
   setBusy?.(null);
+  return false; // cho gửi tiếp, không kẹt UI
 }
 
 /** ---------- Small UI bits ---------- */
@@ -246,15 +250,7 @@ function Badge({
       ? "#75a7ff"
       : "#cbd5e1";
   return (
-    <span
-      style={{
-        background: bg,
-        color: tx,
-        padding: "2px 8px",
-        borderRadius: 999,
-        fontSize: 12,
-      }}
-    >
+    <span style={{ background: bg, color: tx, padding: "2px 8px", borderRadius: 999, fontSize: 12 }}>
       {children}
     </span>
   );
@@ -262,40 +258,11 @@ function Badge({
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
-    <div
-      style={{
-        position: "fixed",
-        right: 16,
-        bottom: 16,
-        background: "#101826",
-        color: "#e5e7eb",
-        border: "1px solid #1f2937",
-        borderRadius: 12,
-        width: 300,
-        zIndex: 50,
-      }}
-    >
-      <div
-        style={{
-          padding: "10px 12px",
-          borderBottom: "1px solid #1f2937",
-          fontWeight: 600,
-        }}
-      >
-        Thông báo
-      </div>
-      <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>
-        {text}
-      </div>
-      <div
-        style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}
-      >
-        <button
-          onClick={onClose}
-          style={{ padding: "6px 12px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}
-        >
-          OK
-        </button>
+    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300, zIndex: 50 }}>
+      <div style={{ padding: "10px 12px", borderBottom: "1px solid #1f2937", fontWeight: 600 }}>Thông báo</div>
+      <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>{text}</div>
+      <div style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}>
+        <button onClick={onClose} style={{ padding: "6px 12px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}>OK</button>
       </div>
     </div>
   );
@@ -392,20 +359,12 @@ export default function App() {
 
   /** FHE Readiness */
   const [fheReady, setFheReady] = useState<boolean>(false);
-  const [fheReadySince, setFheReadySince] = useState<number | null>(null);
-  const fheWarmed = fheReady && (fheReadySince !== null ? nowMs() - fheReadySince >= 10_000 : false);
-
   useEffect(() => {
     let stop = false;
     async function tick() {
       if (!active) return;
       const ok = await isFheReady(active);
-      if (stop) return;
-      setFheReady((prev) => {
-        if (!prev && ok) setFheReadySince(nowMs());
-        if (!ok) setFheReadySince(null);
-        return ok;
-      });
+      if (!stop) setFheReady(ok);
     }
     tick();
     const id = setInterval(tick, 2000);
@@ -420,6 +379,7 @@ export default function App() {
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
     const ended = detail ? Number(detail.endTime) <= nowSec() : false;
     if (ended) return setToast("Phiên đã kết thúc.");
+    if (!fheReady) return setToast("FHE key chưa sẵn sàng, thử lại sau vài giây.");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
@@ -430,28 +390,26 @@ export default function App() {
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 1) FHE public key
+      // 1) Đảm bảo public key
       await waitPublicKey(active, setBusy);
 
-      // 2) Encrypt + retry
+      // 2) Encrypt -> nhận inputProof (đừng để treo lâu)
       const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
       // 3) Encode calldata
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      // 4) Preflight simulate (eth_call loop)
-      await preflightBid(active, data, me, setBusy);
+      // 4) Preflight nhanh (không chặn gửi nếu fail)
+      await quickPreflight(active, data, me, setBusy);
 
-      // 5) Ước lượng gas (optional)
-      let gasLimit = 1_200_000n;
+      // 5) Gửi thật — gasLimit cao để tránh out-of-gas do precompiles
+      setBusy("Sending transaction…");
+      let gasLimit = 3_000_000n;
       try {
         const est = await signer.estimateGas({ to: active, data });
         if (est && est > 0n) gasLimit = est + (est / 5n);
       } catch {}
-
-      // 6) Gửi thật
-      setBusy("Sending transaction…");
       const tx = await signer.sendTransaction({ to: active, data, gasLimit });
       await tx.wait();
 
@@ -464,13 +422,11 @@ export default function App() {
         err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       const reason = decoded ? ` | Revert: ${decoded}` : "";
       const txHash =
-        err?.transactionHash ||
-        err?.receipt?.transactionHash ||
-        err?.hash || "";
+        err?.transactionHash || err?.receipt?.transactionHash || err?.hash || "";
       const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
       const hint =
         /execution reverted|InvalidInput|Cipher|Proof|PublicKey|Invalid|input|simulation/i.test((base || "") + reason)
-          ? " (Có thể FHE key/proof chưa đồng bộ. App đã preflight; thử lại sau 20–60s.)"
+          ? " (Thử lại: bấm Submit ngay sau khi ô nút hiển thị “Sending…”; đừng đợi quá lâu để tránh proof hết hạn.)"
           : "";
       setToast("Bid thất bại: " + base + reason + hint + link);
     } finally {
@@ -536,16 +492,15 @@ export default function App() {
 
       setToast(`Deploy thành công: ${newAddr}`);
 
-      // đưa lên đầu danh sách + set active
       const next = Array.from(new Set([newAddr, ...addrList]));
       setAddrList(next);
       setActive(newAddr);
 
-      // đợi contract sẵn sàng trả getStatus() (poll)
-      for (let i = 0; i < 20; i++) {
+      // Poll tới khi getStatus() đọc được
+      for (let i = 0; i < 15; i++) {
         const st = await safeReadStatus(newAddr);
         if (st) break;
-        await sleep(1500);
+        await sleep(1000);
       }
       await refreshDetail();
     } catch (err: any) {
@@ -714,10 +669,7 @@ export default function App() {
                   disabled={!!busy || !detail || ended}
                   style={{ padding: "10px 16px", borderRadius: 8, background: "#2563eb", color: "white" }}
                 >
-                  {busy
-                    ? busy
-                    : (fheWarmed ? "Submit encrypted bid"
-                                  : (fheReady ? "Warming FHE key…" : "Waiting FHE key…"))}
+                  {busy ? busy : (fheReady ? "Submit encrypted bid" : "Waiting FHE key…")}
                 </button>
               </form>
 
