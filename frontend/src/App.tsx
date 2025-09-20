@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, type FormEvent } from "react";
 import { BrowserProvider, Contract, ContractFactory, Fragment, Interface, JsonRpcProvider } from "ethers";
-import { getFheInstance, waitPublicKey, encryptBidWithRetry, decodeRevert } from "./lib/fhe";
+import { waitPublicKey, encryptBidWithRetry, decodeRevert } from "./lib/fhe";
 import auctionAbiJson from "./abi/FHEAuction.json";
 import { CHAIN_ID, AUCTIONS as ENV_AUCTIONS, AUCTION_META, RPCS } from "./config";
 
