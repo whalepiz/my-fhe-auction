@@ -1,5 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import React, { useEffect, useMemo, useState, FormEvent } from "react";
 import {
   BrowserProvider,
   Contract,
@@ -8,17 +7,16 @@ import {
   Interface,
   JsonRpcProvider,
 } from "ethers";
-import auctionAbiJson from "./abi/FHEAuction.json";
 import { getFheInstance } from "./lib/fhe";
+import auctionAbiJson from "./abi/FHEAuction.json";
 import { CHAIN_ID, AUCTIONS as ENV_AUCTIONS, AUCTION_META } from "./config";
 
-/** ---------- ABI / Bytecode ---------- */
+/* ------------------- ABI / bytecode ------------------- */
 const auctionAbi = (auctionAbiJson as any).abi;
 const auctionBytecode: string | undefined = (auctionAbiJson as any)?.bytecode;
 
-/** ---------- Types ---------- */
+/* ------------------- Types ------------------- */
 type Wallet = { address: string | null; chainId: number | null };
-
 type AuctionStatus = {
   item: string;
   endTime: bigint;
@@ -27,7 +25,7 @@ type AuctionStatus = {
   winningIndexEnc?: string;
 };
 
-/** ---------- Utils ---------- */
+/* ------------------- Utils ------------------- */
 const RPCS = [
   "https://eth-sepolia.public.blastapi.io",
   "https://endpoints.omniatech.io/v1/eth/sepolia/public",
@@ -37,28 +35,20 @@ const RPCS = [
 
 const LS_KEY = "fhe_auctions";
 
-const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
+const fmtTs = (ts?: bigint) => (!ts ? "-" : new Date(Number(ts) * 1000).toLocaleString());
 const nowSec = () => Math.floor(Date.now() / 1000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-const fmtTs = (ts?: bigint) => {
-  if (!ts) return "-";
-  const d = new Date(Number(ts) * 1000);
-  return d.toLocaleString();
-};
-const fmtRemain = (s: number) => {
+const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
+function fmtRemain(s: number) {
   if (s <= 0) return "0s";
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   if (d) return `${d}d ${h}h`;
   if (h) return `${h}h ${m}m`;
   if (m) return `${m}m ${sec}s`;
   return `${sec}s`;
-};
+}
 
-/** ---------- Persist local auction list ---------- */
+/* ------------------- Persist list ------------------- */
 function loadLocalAddrs(): string[] {
   try {
     const raw = localStorage.getItem(LS_KEY);
@@ -66,9 +56,7 @@ function loadLocalAddrs(): string[] {
     const arr = JSON.parse(raw);
     if (!Array.isArray(arr)) return [];
     return arr.filter((x: any) => typeof x === "string" && isAddress(x));
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 function saveLocalAddrs(addrs: string[]) {
   const uniq = Array.from(new Set(addrs.filter(isAddress)));
@@ -80,23 +68,15 @@ function initialAddrList(): string[] {
   return Array.from(new Set([...env, ...ls]));
 }
 
-/** ---------- Provider helpers ---------- */
-async function tryProviders<T>(
-  call: (p: BrowserProvider | JsonRpcProvider) => Promise<T>
-): Promise<T> {
+/* ------------------- Provider helpers ------------------- */
+async function tryProviders<T>(call: (p: BrowserProvider | JsonRpcProvider) => Promise<T>): Promise<T> {
   let lastErr: any;
   for (const url of RPCS) {
     const p = new JsonRpcProvider(url);
-    try {
-      return await call(p);
-    } catch (e: any) {
-      lastErr = e;
-      continue;
-    }
+    try { return await call(p); } catch (e) { lastErr = e; continue; }
   }
   throw lastErr ?? new Error("All providers failed");
 }
-
 async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
   try {
     return await tryProviders(async (provider) => {
@@ -111,18 +91,12 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
     });
   } catch (err: any) {
     const msg = String(err?.message || err);
-    if (
-      err?.code === "BAD_DATA" ||
-      err?.value === "0x" ||
-      /bad data|invalid|selector|reverted/i.test(msg)
-    ) {
-      return null;
-    }
+    if (err?.code === "BAD_DATA" || err?.value === "0x" || /bad data|invalid|selector|reverted/i.test(msg)) return null;
     return null;
   }
 }
 
-/** ---------- FHE helpers ---------- */
+/* ------------------- FHE helpers ------------------- */
 async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
   try {
     const inst = await getFheInstance();
@@ -131,83 +105,48 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
       await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 120000 });
       return;
     }
-    // Fallback
     for (let i = 1; i <= 8; i++) {
       try {
         setBusy?.(`Fetching FHE key… (try ${i}/8)`);
-        if ((inst as any)?.getPublicKey) {
-          await (inst as any).getPublicKey(contractAddr);
-          return;
-        }
+        if ((inst as any)?.getPublicKey) { await (inst as any).getPublicKey(contractAddr); return; }
         break;
-      } catch {
-        await sleep(1500 * i);
-      }
+      } catch { await sleep(1500 * i); }
     }
-  } finally {
-    setBusy?.(null);
-  }
+  } finally { setBusy?.(null); }
 }
-async function encryptBidWithRetry(
-  contractAddr: string,
-  signerAddr: string,
-  value: bigint,
-  setBusy?: (s: string | null) => void
-) {
+
+async function encryptBid(contractAddr: string, signerAddr: string, value: bigint, setBusy?: (s: string | null) => void) {
   const inst = await getFheInstance();
-  for (let i = 1; i <= 12; i++) {
-    try {
-      setBusy?.(`Encrypting (try ${i}/12)…`);
-      const buf = inst.createEncryptedInput(contractAddr, signerAddr);
-      buf.add32(value);
-      const enc = await buf.encrypt();
-      return enc;
-    } catch (err: any) {
-      const msg = String(err?.message || "");
-      const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
-      if (!retriable || i === 12) throw err;
-      await sleep(800 * i);
-    }
-  }
-  throw new Error("FHE key not ready.");
+  setBusy?.("Encrypting…");
+  const buf = inst.createEncryptedInput(contractAddr, signerAddr);
+  buf.add32(value);
+  return await buf.encrypt();
 }
+
 function decodeRevert(err: any): string | null {
   try {
     const data =
-      err?.data?.data ||
-      err?.error?.data ||
-      err?.error?.error?.data ||
-      err?.info?.error?.data ||
-      err?.data ||
-      err?.receipt?.revertReason ||
-      null;
+      err?.data?.data || err?.error?.data || err?.error?.error?.data ||
+      err?.info?.error?.data || err?.data || err?.receipt?.revertReason || null;
     if (!data) return null;
     const iface = new Interface(auctionAbi);
     const parsed = iface.parseError(data);
     if (!parsed) return null;
     const args = parsed?.args ? JSON.stringify(parsed.args) : "";
     return `${parsed.name}${args ? " " + args : ""}`;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-/** ---------- Small UI bits ---------- */
+/* ------------------- Small UI ------------------- */
 function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: React.ReactNode }) {
-  const bg =
-    color === "green" ? "#103e2a" :
-    color === "orange" ? "#3f2b00" :
-    color === "blue" ? "#0b274d" : "#2a2d35";
-  const tx =
-    color === "green" ? "#50e3a4" :
-    color === "orange" ? "#ffca70" :
-    color === "blue" ? "#75a7ff" : "#cbd5e1";
+  const bg = color === "green" ? "#103e2a" : color === "orange" ? "#3f2b00" : color === "blue" ? "#0b274d" : "#2a2d35";
+  const tx = color === "green" ? "#50e3a4" : color === "orange" ? "#ffca70" : color === "blue" ? "#75a7ff" : "#cbd5e1";
   return <span style={{ background: bg, color: tx, padding: "2px 8px", borderRadius: 999, fontSize: 12 }}>{children}</span>;
 }
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
-    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300, zIndex: 50 }}>
+    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300, zIndex: 9999 }}>
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #1f2937", fontWeight: 600 }}>Thông báo</div>
       <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>{text}</div>
       <div style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}>
@@ -217,11 +156,11 @@ function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   );
 }
 
-/** ===================================================
- *                     APP
- * =================================================== */
+/* ======================================================
+ *                          APP
+ * ====================================================== */
 export default function App() {
-  /** Wallet */
+  /* Wallet */
   const [wallet, setWallet] = useState<Wallet>({ address: null, chainId: null });
 
   async function connect() {
@@ -230,28 +169,14 @@ export default function App() {
 
     const sepoliaHex = "0xaa36a7"; // 11155111
     try {
-      await anyWin.ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: sepoliaHex }],
-      });
+      await anyWin.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: sepoliaHex }] });
     } catch (err: any) {
       if (err?.code === 4902) {
         await anyWin.ethereum.request({
           method: "wallet_addEthereumChain",
-          params: [
-            {
-              chainId: sepoliaHex,
-              chainName: "Sepolia",
-              nativeCurrency: { name: "SepoliaETH", symbol: "SEP", decimals: 18 },
-              rpcUrls: RPCS,
-              blockExplorerUrls: ["https://sepolia.etherscan.io"],
-            },
-          ],
+          params: [{ chainId: sepoliaHex, chainName: "Sepolia", nativeCurrency: { name: "SepoliaETH", symbol: "SEP", decimals: 18 }, rpcUrls: RPCS, blockExplorerUrls: ["https://sepolia.etherscan.io"] }],
         });
-        await anyWin.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: sepoliaHex }],
-        });
+        await anyWin.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: sepoliaHex }] });
       } else {
         alert(`Please switch MetaMask to Sepolia (chainId ${CHAIN_ID}).`);
         return;
@@ -265,7 +190,7 @@ export default function App() {
     setWallet({ address: await signer.getAddress(), chainId: Number(net.chainId) });
   }
 
-  /** Auction list (persist) */
+  /* Auctions list */
   const initialAddresses = useMemo(initialAddrList, []);
   const [addrList, setAddrList] = useState<string[]>(initialAddresses);
   const [active, setActive] = useState<string>(initialAddresses[0] ?? "");
@@ -275,7 +200,6 @@ export default function App() {
 
   useEffect(() => { saveLocalAddrs(addrList); }, [addrList]);
 
-  // load all cards
   useEffect(() => {
     (async () => {
       if (!addrList.length) return;
@@ -283,25 +207,13 @@ export default function App() {
       try {
         const results = await Promise.allSettled(addrList.map((addr) => safeReadStatus(addr)));
         const map: Record<string, AuctionStatus | null> = {};
-        results.forEach((res, i) => {
-          const addr = addrList[i];
-          map[addr] = res.status === "fulfilled" ? res.value : null;
-        });
+        results.forEach((res, i) => { map[addrList[i]] = res.status === "fulfilled" ? res.value : null; });
         setListStatus(map);
-
-        // nếu vừa deploy xong & chưa setActive → tự set auction đầu tiên có trạng thái hợp lệ
-        if (!active) {
-          const firstOk = addrList.find((a) => map[a] !== null);
-          if (firstOk) setActive(firstOk);
-        }
-      } finally {
-        setLoadingList(false);
-      }
+      } finally { setLoadingList(false); }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addrList.join(",")]);
 
-  /** Active detail */
+  /* Active detail */
   const [detail, setDetail] = useState<AuctionStatus | null>(null);
   const [bid, setBid] = useState("");
   const [busy, setBusy] = useState<null | string>(null);
@@ -314,82 +226,92 @@ export default function App() {
   }
   useEffect(() => { refreshDetail(); }, [active]);
 
-  /** Actions */
+  /* Actions */
   async function submitBid(ev: FormEvent) {
     ev.preventDefault();
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
-    if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
+    if (Number(detail.endTime) <= nowSec()) return setToast("Phiên đã kết thúc.");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
 
-    try {
+    const sendOnce = async () => {
       const net = await provider.getNetwork();
       if (Number(net.chainId) !== CHAIN_ID) await connect();
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 1) Warm public key
+      // 1) Đợi key
       await waitPublicKey(active, setBusy);
 
-      // 2) Encrypt + retry (tối đa 12 lần)
-      const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
-
-      // 3) Encode calldata
-      const iface = new Interface(auctionAbi);
-      const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
-
-      // 4) Preflight (chỉ cảnh báo – KHÔNG chặn gửi)
+      // 2) Encrypt + preflight (đảm bảo cùng 'from')
+      const enc1 = await encryptBid(active, me, BigInt(bid), setBusy);
+      setBusy("Preflight…");
+      const c1 = new Contract(active, auctionAbi, signer);
       try {
-        setBusy("Preflight…");
-        await signer.call({ to: active, data });
-      } catch (pfErr: any) {
-        const reason = decodeRevert(pfErr) || "execution reverted (unknown custom error)";
-        setToast(
-          "Preflight cảnh báo: " +
-            reason +
-            "\n(Mẹo: nếu liên quan key/proof hãy thử lại sau 20–60s)\n— Vẫn sẽ mở MetaMask để bạn gửi giao dịch."
-        );
+        // @ts-ignore (ethers v6)
+        await (c1 as any).bid.staticCall(enc1.handles[0], enc1.inputProof);
+      } catch (err: any) {
+        const decoded = decodeRevert(err);
+        const base = err?.shortMessage || err?.info?.error?.message || err?.message || "execution reverted";
+        const reason = decoded ? ` | Revert: ${decoded}` : "";
+        setBusy(null);
+        throw new Error("Preflight failed: " + base + reason);
       }
 
-      // 5) Ước lượng gas (có buffer) + gửi tx
+      // 3) Encrypt lại ngay trước khi gửi để proof tươi
+      const enc2 = await encryptBid(active, me, BigInt(bid), setBusy);
       setBusy("Sending transaction…");
+
       let gasLimit = 1_200_000n;
       try {
-        const est = await signer.estimateGas({ to: active, data });
+        // @ts-ignore
+        const est: bigint = await (c1 as any).bid.estimateGas(enc2.handles[0], enc2.inputProof);
         if (est && est > 0n) gasLimit = est + (est / 5n);
       } catch {}
 
-      // dùng Contract để MetaMask hiển thị gọn (cast any để tránh lỗi types trên Vercel)
-      const c = new Contract(active, auctionAbi, signer) as any;
-      const tx = await c.bid(enc.handles[0], enc.inputProof, { gasLimit });
+      // @ts-ignore
+      const tx = await (c1 as any).bid(enc2.handles[0], enc2.inputProof, { gasLimit });
       await tx.wait();
+    };
 
+    try {
+      await sendOnce();
       setToast(`Đã gửi bid (encrypted) = ${bid}`);
       setBid("");
       await refreshDetail();
     } catch (err: any) {
-      const decoded = decodeRevert(err);
-      const base =
-        err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
-      const reason = decoded ? ` | Revert: ${decoded}` : "";
-      const txHash =
-        err?.transactionHash ||
-        err?.receipt?.transactionHash ||
-        err?.hash || "";
-      const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
-      setToast("Bid thất bại: " + base + reason + link);
-    } finally {
-      setBusy(null);
+      // Nếu lỗi liên quan proof/unknown → thử lại 1 lần với proof mới tinh
+      const msg = String(err?.message || "");
+      if (/Preflight failed|Invalid|proof|PublicKey|execution reverted|unknown/i.test(msg)) {
+        try {
+          setBusy("Retry with fresh proof…");
+          await sendOnce();
+          setToast(`Đã gửi bid (retry) = ${bid}`);
+          setBid("");
+          await refreshDetail();
+          return;
+        } catch (err2: any) {
+          const decoded = decodeRevert(err2);
+          const base = err2?.shortMessage || err2?.info?.error?.message || err2?.message || "Unknown error";
+          const reason = decoded ? ` | Revert: ${decoded}` : "";
+          const txHash = err2?.transactionHash || err2?.receipt?.transactionHash || err2?.hash || "";
+          const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
+          setToast("Bid thất bại: " + base + reason + link);
+        } finally { setBusy(null); }
+      } else {
+        setToast("Bid thất bại: " + msg);
+        setBusy(null);
+      }
     }
   }
 
   async function settleAndReveal() {
     if (!active) return;
     if (!detail) return setToast("Địa chỉ không tương thích.");
-    if (Number(detail?.endTime || 0) > nowSec()) return setToast("Chưa hết hạn.");
+    if (Number(detail.endTime) > nowSec()) return setToast("Chưa hết hạn.");
 
     try {
       const anyWin = window as any;
@@ -404,9 +326,12 @@ export default function App() {
 
       const inputs = (frag as any).inputs ?? [];
       let tx;
-      if (inputs.length === 0) tx = await (c as any).settle();
-      else if (inputs.length === 1 && inputs[0].type === "address[]") {
+      if (inputs.length === 0) {
+        // @ts-ignore
+        tx = await (c as any).settle();
+      } else if (inputs.length === 1 && inputs[0].type === "address[]") {
         const me = await signer.getAddress();
+        // @ts-ignore
         tx = await (c as any).settle([me]);
       } else {
         throw new Error(`Unsupported settle signature: ${(frag as any).format("full")}`);
@@ -431,37 +356,38 @@ export default function App() {
       if (Number(net.chainId) !== CHAIN_ID) await connect();
       const signer = await provider.getSigner();
 
-      if (!auctionBytecode) {
-        return setToast(
-          "Thiếu bytecode trong FHEAuction.json. Hãy dùng artifact Hardhat (có bytecode)."
-        );
-      }
+      if (!auctionBytecode) return setToast("Thiếu bytecode trong FHEAuction.json.");
 
       const factory = new ContractFactory(auctionAbi, auctionBytecode, signer);
       const c = await factory.deploy(name.trim(), secs);
       await c.waitForDeployment();
-      // @ts-ignore v6
+      // @ts-ignore
       const newAddr: string = c.target;
 
+      // Poll cho đến khi đọc được getStatus trên RPC
+      for (let i = 0; i < 8; i++) {
+        const st = await safeReadStatus(newAddr);
+        if (st) break;
+        await sleep(1200);
+      }
+
+      setToast(`Deploy thành công: ${newAddr}`);
       const next = Array.from(new Set([newAddr, ...addrList]));
       setAddrList(next);
       setActive(newAddr);
-      setToast(`Deploy thành công: ${newAddr}`);
-      await refreshDetail(); // tự nạp trạng thái để có thể bid ngay
+      await refreshDetail();
     } catch (err: any) {
       const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       setToast("Deploy thất bại: " + msg);
     }
   }
 
-  /** ---------- Simple quick create UI (header button) ---------- */
+  /* Quick create header */
   const [creating, setCreating] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [newMinutes, setNewMinutes] = useState(10);
 
-  /** ---------- Render ---------- */
- 
-
+  /* Render */
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -471,29 +397,13 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <div style={{ display: "flex", gap: 6 }}>
-            <input
-              placeholder="Item name"
-              value={newItem}
-              onChange={(e) => setNewItem(e.target.value)}
-              style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }}
-            />
-            <input
-              type="number"
-              min={1}
-              value={newMinutes}
-              onChange={(e) => setNewMinutes(Number(e.target.value))}
-              style={{ width: 90, padding: "6px 8px", borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }}
-            />
+            <input placeholder="Item name" value={newItem} onChange={(e) => setNewItem(e.target.value)}
+              style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }} />
+            <input type="number" min={1} value={newMinutes} onChange={(e) => setNewMinutes(Number(e.target.value))}
+              style={{ width: 90, padding: "6px 8px", borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }} />
             <button
-              onClick={async () => {
-                if (!newItem.trim()) return setToast("Nhập tên item.");
-                setCreating(true);
-                try { await createAuction(newItem, newMinutes); }
-                finally { setCreating(false); }
-              }}
-              disabled={creating}
-              style={{ padding: "6px 10px", borderRadius: 8, background: "#2563eb", color: "white" }}
-            >
+              onClick={async () => { if (!newItem.trim()) return setToast("Nhập tên item."); setCreating(true); try { await createAuction(newItem, newMinutes); } finally { setCreating(false); } }}
+              disabled={creating} style={{ padding: "6px 10px", borderRadius: 8, background: "#2563eb", color: "white" }}>
               {creating ? "Deploying…" : "+ Create auction"}
             </button>
           </div>
@@ -507,13 +417,12 @@ export default function App() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16 }}>
-        {/* LEFT: list */}
+        {/* LEFT */}
         <section style={{ border: "1px solid #1f2937", borderRadius: 16, background: "#0b1220" }}>
           <div style={{ padding: "12px 14px", borderBottom: "1px solid #1f2937", display: "flex", justifyContent: "space-between" }}>
             <h3 style={{ margin: 0, fontSize: 16 }}>Auctions</h3>
             {loadingList && <span style={{ fontSize: 12, opacity: 0.7 }}>Loading…</span>}
           </div>
-
           <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
             {(addrList.length ? addrList : [""]).map((addr) => {
               const st = listStatus[addr];
@@ -523,26 +432,16 @@ export default function App() {
               const endedCard = st ? Number(st.endTime) <= nowSec() : false;
 
               return (
-                <div
-                  key={addr}
-                  style={{
-                    border: "1px solid #1f2937",
-                    borderRadius: 12,
-                    padding: 12,
-                    background: isActive ? "#0e1627" : "#0b1220",
-                  }}
-                >
+                <div key={addr} style={{ border: "1px solid #1f2937", borderRadius: 12, padding: 12, background: isActive ? "#0e1627" : "#0b1220" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                     <div style={{ fontWeight: 700 }}>
                       {st === undefined ? "loading…" : incompatible ? "(incompatible)" : meta?.title || st?.item || "(unknown)"}
                     </div>
-                    {st && (
-                      <div>
-                        {!st.settled && !endedCard && <Badge color="green">Ongoing</Badge>}
-                        {!st.settled && endedCard && <Badge color="orange">Ended</Badge>}
-                        {st.settled && <Badge color="blue">Settled</Badge>}
-                      </div>
-                    )}
+                    {st && (<div>
+                      {!st.settled && !endedCard && <Badge color="green">Ongoing</Badge>}
+                      {!st.settled && endedCard && <Badge color="orange">Ended</Badge>}
+                      {st.settled && <Badge color="blue">Settled</Badge>}
+                    </div>)}
                   </div>
 
                   <div style={{ fontSize: 12, opacity: 0.8 }}>
@@ -558,11 +457,8 @@ export default function App() {
                     <a href={`https://sepolia.etherscan.io/address/${addr}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#93c5fd" }}>
                       Etherscan
                     </a>
-                    <code
-                      title="Copy"
-                      onClick={() => navigator.clipboard?.writeText(addr).then(() => setToast("Đã copy địa chỉ hợp đồng."))}
-                      style={{ fontSize: 11, opacity: 0.7, cursor: "pointer" }}
-                    >
+                    <code title="Copy" onClick={() => navigator.clipboard?.writeText(addr).then(() => setToast("Đã copy địa chỉ hợp đồng."))}
+                      style={{ fontSize: 11, opacity: 0.7, cursor: "pointer" }}>
                       {addr.slice(0, 8)}…{addr.slice(-6)}
                     </code>
                   </div>
@@ -572,7 +468,7 @@ export default function App() {
           </div>
         </section>
 
-        {/* RIGHT: active */}
+        {/* RIGHT */}
         {!!active && (
           <section style={{ border: "1px solid #1f2937", borderRadius: 16, background: "#0b1220" }}>
             <div style={{ padding: "12px 14px", borderBottom: "1px solid #1f2937", display: "flex", justifyContent: "space-between" }}>
@@ -599,31 +495,19 @@ export default function App() {
               <form onSubmit={submitBid} style={{ display: "grid", gap: 10, maxWidth: 520, marginTop: 8 }}>
                 <label style={{ display: "grid", gap: 6 }}>
                   Your bid (uint32)
-                  <input
-                    type="number"
-                    min={0}
-                    step={1}
-                    value={bid}
-                    onChange={(e) => setBid(e.target.value)}
+                  <input type="number" min={0} step={1} value={bid} onChange={(e) => setBid(e.target.value)}
                     disabled={!detail || Number(detail?.endTime || 0) <= nowSec() || !!busy}
-                    style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }}
-                  />
+                    style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }} />
                 </label>
-                <button
-                  type="submit"
-                  disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec()}
-                  style={{ padding: "10px 16px", borderRadius: 8, background: "#2563eb", color: "white" }}
-                >
+                <button type="submit" disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec()}
+                  style={{ padding: "10px 16px", borderRadius: 8, background: "#2563eb", color: "white" }}>
                   {busy ? busy : "Submit encrypted bid"}
                 </button>
               </form>
 
               <div style={{ marginTop: 10 }}>
-                <button
-                  onClick={settleAndReveal}
-                  disabled={!detail || !(Number(detail?.endTime || 0) <= nowSec())}
-                  style={{ padding: "8px 14px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}
-                >
+                <button onClick={settleAndReveal} disabled={!detail || !(Number(detail?.endTime || 0) <= nowSec())}
+                  style={{ padding: "8px 14px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}>
                   Settle & reveal
                 </button>
               </div>
