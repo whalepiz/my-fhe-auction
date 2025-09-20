@@ -1,5 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import React, { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   BrowserProvider,
   Contract,
@@ -18,6 +17,7 @@ const auctionBytecode: string | undefined = (auctionAbiJson as any)?.bytecode;
 
 /** ---------- Types ---------- */
 type Wallet = { address: string | null; chainId: number | null };
+
 type AuctionStatus = {
   item: string;
   endTime: bigint;
@@ -33,9 +33,8 @@ const RPCS = [
   "https://ethereum-sepolia.publicnode.com",
   "https://rpc2.sepolia.org",
 ];
-
 const LS_KEY = "fhe_auctions";
-const MIN_WARM_MS = 60_000; // chờ key “ấm” tối thiểu 60s
+const MIN_WARM_MS = 20_000; // thời gian làm ấm FHE key tối thiểu (20s)
 
 function fmtTs(ts?: bigint) {
   if (!ts) return "-";
@@ -207,6 +206,29 @@ function decodeRevert(err: any): string | null {
   }
 }
 
+/** ---------- Preflight simulate + gas (có from) ---------- */
+async function preflight(signer: any, to: string, data: string) {
+  const from = await signer.getAddress();
+
+  try {
+    // simulate eth_call với đúng from (proof phụ thuộc msg.sender)
+    await signer.call({ to, data, from });
+  } catch (err: any) {
+    const reason = decodeRevert(err);
+    const base = err?.shortMessage || err?.info?.error?.message || err?.message || "reverted";
+    throw new Error("Simulation failed: " + (reason ? reason : base));
+  }
+
+  try {
+    const g = await signer.estimateGas({ to, data, from });
+    return g && g > 0n ? g : 1_200_000n;
+  } catch (err: any) {
+    const reason = decodeRevert(err);
+    const base = err?.shortMessage || err?.info?.error?.message || err?.message || "estimateGas reverted";
+    throw new Error("Gas estimate failed: " + (reason ? reason : base));
+  }
+}
+
 /** ---------- Small UI bits ---------- */
 function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: React.ReactNode }) {
   const bg =
@@ -343,27 +365,6 @@ export default function App() {
     return () => { stop = true; clearInterval(id); };
   }, [active]);
 
-  /** Preflight helper (simulate call & gas) */
-  async function preflight(signer: any, to: string, data: string) {
-    // 1) simulate
-    try {
-      await signer.call({ to, data });
-    } catch (err: any) {
-      const reason = decodeRevert(err);
-      const base = err?.shortMessage || err?.info?.error?.message || err?.message || "reverted";
-      throw new Error("Simulation failed: " + (reason ? reason : base));
-    }
-    // 2) gas estimate
-    try {
-      const g = await signer.estimateGas({ to, data });
-      return g && g > 0n ? g : 1_200_000n;
-    } catch (err: any) {
-      const reason = decodeRevert(err);
-      const base = err?.shortMessage || err?.info?.error?.message || err?.message || "estimateGas reverted";
-      throw new Error("Gas estimate failed: " + (reason ? reason : base));
-    }
-  }
-
   /** Actions */
   async function submitBid(ev: FormEvent) {
     ev.preventDefault();
@@ -371,36 +372,33 @@ export default function App() {
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
     if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
-    if (!fheWarmed) {
-      const left = fheReadySince ? Math.max(0, Math.ceil((MIN_WARM_MS - (nowMs() - fheReadySince)) / 1000)) : 10;
-      return setToast(`FHE key đang làm ấm, vui lòng đợi ~${left}s rồi thử lại.`);
-    }
+    if (!fheWarmed) return setToast("FHE key chưa sẵn sàng/đang làm ấm, đợi vài giây rồi thử lại.");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
 
     try {
-      setBusy("Encrypting…");
       const net = await provider.getNetwork();
       if (Number(net.chainId) !== CHAIN_ID) await connect();
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
+      // 1) FHE public key
       await waitPublicKey(active, setBusy);
 
+      // 2) Encrypt + retry
       const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
-      setBusy("Preparing transaction…");
+      // 3) Encode calldata
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      // Preflight: simulate + gas
-      setBusy("Simulating…");
-      const gasEst = await preflight(signer, active, data);
-      const gasLimit = gasEst + gasEst / 5n;
-
-      // Send
+      // 4) Preflight (simulate + estimateGas) với from = ví của bạn
       setBusy("Sending transaction…");
+      const est = await preflight(signer, active, data);
+      const gasLimit = est + (est / 5n);
+
+      // 5) Send
       const tx = await signer.sendTransaction({ to: active, data, gasLimit });
       await tx.wait();
 
@@ -408,11 +406,19 @@ export default function App() {
       setBid("");
       await refreshDetail();
     } catch (err: any) {
-      const base = err?.message || err?.shortMessage || err?.info?.error?.message || "Unknown error";
-      const hint = /Simulation failed|estimate|revert|Invalid|Proof|Cipher|input/i.test(base)
-        ? " (FHE key/proof có thể chưa đồng bộ hoàn toàn. Hãy đợi thêm 20–60s và thử lại.)"
+      const decoded = decodeRevert(err);
+      const base =
+        err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
+      const reason = decoded ? ` | Revert: ${decoded}` : "";
+      const txHash =
+        err?.transactionHash ||
+        err?.receipt?.transactionHash ||
+        err?.hash || "";
+      const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
+      const hint = /execution reverted|InvalidInput|Cipher|Proof|PublicKey|Invalid|input/i.test(base + reason)
+        ? " (Có thể FHE key/proof chưa đồng bộ hoàn toàn. Đợi 20–60s rồi thử lại.)"
         : "";
-      setToast("Bid thất bại: " + base + hint);
+      setToast("Bid thất bại: " + base + reason + hint + link);
     } finally {
       setBusy(null);
     }
@@ -464,27 +470,46 @@ export default function App() {
       const signer = await provider.getSigner();
 
       if (!auctionBytecode) {
-        return setToast("Thiếu bytecode trong FHEAuction.json. Hãy dùng artifact Hardhat (có bytecode).");
+        return setToast(
+          "Thiếu bytecode trong FHEAuction.json. Hãy dùng artifact Hardhat (có bytecode)."
+        );
       }
 
       const factory = new ContractFactory(auctionAbi, auctionBytecode, signer);
       const c = await factory.deploy(name.trim(), secs);
       await c.waitForDeployment();
-      // @ts-ignore ethers v6
+      // @ts-ignore v6
       const newAddr: string = c.target;
 
       setToast(`Deploy thành công: ${newAddr}`);
+
+      // Cập nhật list + active
       const next = Array.from(new Set([newAddr, ...addrList]));
       setAddrList(next);
       setActive(newAddr);
-      await refreshDetail();
+
+      // Poll tối đa ~30s để đọc được getStatus() (khỏi cần bấm Refresh)
+      let got = false;
+      for (let i = 0; i < 20; i++) {
+        const st = await safeReadStatus(newAddr);
+        if (st) {
+          setDetail(st);
+          setListStatus((m) => ({ ...m, [newAddr]: st }));
+          got = true;
+          break;
+        }
+        await sleep(1500);
+      }
+      if (!got) {
+        setListStatus((m) => ({ ...m, [newAddr]: null }));
+      }
     } catch (err: any) {
       const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       setToast("Deploy thất bại: " + msg);
     }
   }
 
-  /** ---------- Simple quick create UI ---------- */
+  /** ---------- Simple quick create UI (header button) ---------- */
   const [creating, setCreating] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [newMinutes, setNewMinutes] = useState(10);
