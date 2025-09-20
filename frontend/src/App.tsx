@@ -1,4 +1,5 @@
-import React, { type FormEvent, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import {
   BrowserProvider,
   Contract,
@@ -7,8 +8,8 @@ import {
   Interface,
   JsonRpcProvider,
 } from "ethers";
-import { getFheInstance } from "./lib/fhe";
 import auctionAbiJson from "./abi/FHEAuction.json";
+import { getFheInstance } from "./lib/fhe";
 import { CHAIN_ID, AUCTIONS as ENV_AUCTIONS, AUCTION_META } from "./config";
 
 /** ---------- ABI / Bytecode ---------- */
@@ -36,15 +37,16 @@ const RPCS = [
 
 const LS_KEY = "fhe_auctions";
 
-function fmtTs(ts?: bigint) {
+const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
+const nowSec = () => Math.floor(Date.now() / 1000);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const fmtTs = (ts?: bigint) => {
   if (!ts) return "-";
   const d = new Date(Number(ts) * 1000);
   return d.toLocaleString();
-}
-function nowSec() { return Math.floor(Date.now() / 1000); }
-function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
-function isAddress(s: string) { return /^0x[a-fA-F0-9]{40}$/.test(s); }
-function fmtRemain(s: number) {
+};
+const fmtRemain = (s: number) => {
   if (s <= 0) return "0s";
   const d = Math.floor(s / 86400);
   const h = Math.floor((s % 86400) / 3600);
@@ -54,7 +56,7 @@ function fmtRemain(s: number) {
   if (h) return `${h}h ${m}m`;
   if (m) return `${m}m ${sec}s`;
   return `${sec}s`;
-}
+};
 
 /** ---------- Persist local auction list ---------- */
 function loadLocalAddrs(): string[] {
@@ -107,7 +109,15 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
       }
       return st;
     });
-  } catch {
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (
+      err?.code === "BAD_DATA" ||
+      err?.value === "0x" ||
+      /bad data|invalid|selector|reverted/i.test(msg)
+    ) {
+      return null;
+    }
     return null;
   }
 }
@@ -121,6 +131,7 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
       await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 120000 });
       return;
     }
+    // Fallback
     for (let i = 1; i <= 8; i++) {
       try {
         setBusy?.(`Fetching FHE key… (try ${i}/8)`);
@@ -137,7 +148,6 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
     setBusy?.(null);
   }
 }
-
 async function encryptBidWithRetry(
   contractAddr: string,
   signerAddr: string,
@@ -145,9 +155,9 @@ async function encryptBidWithRetry(
   setBusy?: (s: string | null) => void
 ) {
   const inst = await getFheInstance();
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 12; i++) {
     try {
-      setBusy?.(`Encrypting (try ${i}/10)…`);
+      setBusy?.(`Encrypting (try ${i}/12)…`);
       const buf = inst.createEncryptedInput(contractAddr, signerAddr);
       buf.add32(value);
       const enc = await buf.encrypt();
@@ -155,13 +165,12 @@ async function encryptBidWithRetry(
     } catch (err: any) {
       const msg = String(err?.message || "");
       const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
-      if (!retriable || i === 10) throw err;
+      if (!retriable || i === 12) throw err;
       await sleep(800 * i);
     }
   }
   throw new Error("FHE key not ready.");
 }
-
 function decodeRevert(err: any): string | null {
   try {
     const data =
@@ -183,26 +192,7 @@ function decodeRevert(err: any): string | null {
   }
 }
 
-/** ---------- NEW: Preflight on-chain (eth_call) ---------- */
-async function preflightOnchain(
-  signer: any,
-  contractAddr: string,
-  calldata: string,
-  setBusy?: (s: string | null) => void
-) {
-  for (let i = 1; i <= 20; i++) {
-    try {
-      setBusy?.(`Preflight… (try ${i}/20)`);
-      await signer.call({ to: contractAddr, data: calldata }); // pass => OK để gửi thật
-      return;
-    } catch {
-      await sleep(1000 + i * 250);
-    }
-  }
-  throw new Error("Preflight failed: execution reverted (unknown custom error)");
-}
-
-/** ---------- UI bits ---------- */
+/** ---------- Small UI bits ---------- */
 function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: React.ReactNode }) {
   const bg =
     color === "green" ? "#103e2a" :
@@ -217,7 +207,7 @@ function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
-    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300, zIndex: 9999 }}>
+    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300, zIndex: 50 }}>
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #1f2937", fontWeight: 600 }}>Thông báo</div>
       <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>{text}</div>
       <div style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}>
@@ -285,6 +275,7 @@ export default function App() {
 
   useEffect(() => { saveLocalAddrs(addrList); }, [addrList]);
 
+  // load all cards
   useEffect(() => {
     (async () => {
       if (!addrList.length) return;
@@ -297,10 +288,17 @@ export default function App() {
           map[addr] = res.status === "fulfilled" ? res.value : null;
         });
         setListStatus(map);
+
+        // nếu vừa deploy xong & chưa setActive → tự set auction đầu tiên có trạng thái hợp lệ
+        if (!active) {
+          const firstOk = addrList.find((a) => map[a] !== null);
+          if (firstOk) setActive(firstOk);
+        }
       } finally {
         setLoadingList(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addrList.join(",")]);
 
   /** Active detail */
@@ -333,27 +331,40 @@ export default function App() {
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 1) FHE public key
+      // 1) Warm public key
       await waitPublicKey(active, setBusy);
 
-      // 2) Encrypt + retry
+      // 2) Encrypt + retry (tối đa 12 lần)
       const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
       // 3) Encode calldata
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      // 4) Preflight on-chain (eth_call) cho tới khi pass
-      await preflightOnchain(signer, active, data, setBusy);
+      // 4) Preflight (chỉ cảnh báo – KHÔNG chặn gửi)
+      try {
+        setBusy("Preflight…");
+        await signer.call({ to: active, data });
+      } catch (pfErr: any) {
+        const reason = decodeRevert(pfErr) || "execution reverted (unknown custom error)";
+        setToast(
+          "Preflight cảnh báo: " +
+            reason +
+            "\n(Mẹo: nếu liên quan key/proof hãy thử lại sau 20–60s)\n— Vẫn sẽ mở MetaMask để bạn gửi giao dịch."
+        );
+      }
 
-      // 5) Ước lượng gas & gửi thật
+      // 5) Ước lượng gas (có buffer) + gửi tx
       setBusy("Sending transaction…");
       let gasLimit = 1_200_000n;
       try {
         const est = await signer.estimateGas({ to: active, data });
         if (est && est > 0n) gasLimit = est + (est / 5n);
       } catch {}
-      const tx = await signer.sendTransaction({ to: active, data, gasLimit });
+
+      // dùng Contract để MetaMask hiển thị gọn (cast any để tránh lỗi types trên Vercel)
+      const c = new Contract(active, auctionAbi, signer) as any;
+      const tx = await c.bid(enc.handles[0], enc.inputProof, { gasLimit });
       await tx.wait();
 
       setToast(`Đã gửi bid (encrypted) = ${bid}`);
@@ -393,10 +404,10 @@ export default function App() {
 
       const inputs = (frag as any).inputs ?? [];
       let tx;
-      if (inputs.length === 0) tx = await c.settle();
+      if (inputs.length === 0) tx = await (c as any).settle();
       else if (inputs.length === 1 && inputs[0].type === "address[]") {
         const me = await signer.getAddress();
-        tx = await c.settle([me]);
+        tx = await (c as any).settle([me]);
       } else {
         throw new Error(`Unsupported settle signature: ${(frag as any).format("full")}`);
       }
@@ -432,11 +443,11 @@ export default function App() {
       // @ts-ignore v6
       const newAddr: string = c.target;
 
-      setToast(`Deploy thành công: ${newAddr}`);
       const next = Array.from(new Set([newAddr, ...addrList]));
       setAddrList(next);
       setActive(newAddr);
-      await refreshDetail();
+      setToast(`Deploy thành công: ${newAddr}`);
+      await refreshDetail(); // tự nạp trạng thái để có thể bid ngay
     } catch (err: any) {
       const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       setToast("Deploy thất bại: " + msg);
@@ -449,6 +460,8 @@ export default function App() {
   const [newMinutes, setNewMinutes] = useState(10);
 
   /** ---------- Render ---------- */
+  const ended = detail ? Number(detail.endTime) <= nowSec() : false;
+
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -547,7 +560,7 @@ export default function App() {
                     </a>
                     <code
                       title="Copy"
-                      onClick={() => navigator.clipboard?.writeText(addr)}
+                      onClick={() => navigator.clipboard?.writeText(addr).then(() => setToast("Đã copy địa chỉ hợp đồng."))}
                       style={{ fontSize: 11, opacity: 0.7, cursor: "pointer" }}
                     >
                       {addr.slice(0, 8)}…{addr.slice(-6)}
