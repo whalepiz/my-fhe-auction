@@ -1,29 +1,99 @@
 // frontend/src/lib/fhe.ts
-import { createInstance, type FhevmInstance } from "@fhevm/sdk";
-import { CHAIN_ID } from "../config";
+import { CHAIN_ID, RPCS } from "../config";
 
-// RPC công khai cho Sepolia (CORS OK)
-const RPC = "https://ethereum-sepolia.publicnode.com";
-// Gateway testnet của Zama
-const GATEWAY = "https://gateway.testnet.zama.ai";
+// Giữ 1 instance SDK trong suốt vòng đời trang
+let _fheInstancePromise: Promise<any> | null = null;
 
-let instance: FhevmInstance | null = null;
+// Một RPC ổn định cho SDK; khi fail, SDK tự lo phần fetch/proof qua relayer
+function pickNetworkUrl(): string {
+  return RPCS[0] || "https://ethereum-sepolia.publicnode.com";
+}
 
-/**
- * Trả về 1 instance FHEVM SDK đã khởi tạo.
- * Dùng ép kiểu "any" để tương thích cả SDK đời cũ (rpcUrl) và đời mới (networkUrl).
- */
-export async function getFheInstance(): Promise<FhevmInstance> {
-  if (instance) return instance;
+export async function getFheInstance(): Promise<any> {
+  if (_fheInstancePromise) return _fheInstancePromise;
 
-  // ép kiểu để TS không than phiền về 'rpcUrl' / 'networkUrl'
-  const cfg: any = {
-    chainId: CHAIN_ID,
-    gatewayUrl: GATEWAY,
-    networkUrl: RPC, // SDK mới
-    rpcUrl: RPC,     // SDK cũ
-  };
+  _fheInstancePromise = (async () => {
+    const { createInstance } = await import("@fhevm/sdk");
+    // API đúng của SDK bản mới: dùng networkUrl (không phải rpcUrl)
+    const instance = await createInstance({
+      networkUrl: pickNetworkUrl(),
+      chainId: CHAIN_ID,
+    });
+    return instance;
+  })();
 
-  instance = (await createInstance(cfg as any)) as FhevmInstance;
-  return instance;
+  return _fheInstancePromise;
+}
+
+// Chờ public key có sẵn (nếu SDK hỗ trợ), fallback getPublicKey
+export async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
+  try {
+    const inst = await getFheInstance();
+    if (typeof inst.waitForPublicKey === "function") {
+      setBusy?.("Preparing FHE key…");
+      await inst.waitForPublicKey(contractAddr, { timeoutMs: 120_000 });
+      return;
+    }
+    // Fallback loop
+    for (let i = 1; i <= 8; i++) {
+      try {
+        setBusy?.(`Fetching FHE key… (try ${i}/8)`);
+        if (typeof inst.getPublicKey === "function") {
+          await inst.getPublicKey(contractAddr);
+          return;
+        }
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 1000 * i));
+      }
+    }
+  } finally {
+    setBusy?.(null);
+  }
+}
+
+export async function encryptBidWithRetry(
+  contractAddr: string,
+  signerAddr: string,
+  value: bigint,
+  setBusy?: (s: string | null) => void
+): Promise<{ handles: string[]; inputProof: string }> {
+  const inst = await getFheInstance();
+  for (let i = 1; i <= 10; i++) {
+    try {
+      setBusy?.(`Encrypting (try ${i}/10)…`);
+      const buf = inst.createEncryptedInput(contractAddr, signerAddr);
+      buf.add32(value);
+      const enc = await buf.encrypt();
+      return enc;
+    } catch (err: any) {
+      const msg = String(err?.message || "");
+      const retry = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
+      if (!retry || i === 10) throw err;
+      await new Promise((r) => setTimeout(r, 800 * i));
+    }
+  }
+  throw new Error("Encryption kept failing.");
+}
+
+export function decodeRevert(abi: any[], err: any): string | null {
+  try {
+    const data =
+      err?.data?.data ||
+      err?.error?.data ||
+      err?.error?.error?.data ||
+      err?.info?.error?.data ||
+      err?.data ||
+      err?.receipt?.revertReason ||
+      null;
+    if (!data) return null;
+    const { Interface } = await import("ethers");
+    const iface = new Interface(abi);
+    const parsed = iface.parseError(data);
+    if (!parsed) return null;
+    const args = parsed?.args ? JSON.stringify(parsed.args) : "";
+    return `${parsed.name}${args ? " " + args : ""}`;
+  } catch {
+    return null;
+  }
 }

@@ -1,7 +1,15 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+// frontend/vite.config.ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
-// https://vite.dev/config/
+// Polyfill 'global' cho một số lib phụ thuộc (tránh màn hình đen)
 export default defineConfig({
   plugins: [react()],
-})
+  define: {
+    global: "window",
+    "process.env": {},
+  },
+  optimizeDeps: {
+    include: ["@fhevm/sdk"],
+  },
+});
