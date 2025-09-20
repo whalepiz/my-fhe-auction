@@ -460,7 +460,7 @@ export default function App() {
   const [newMinutes, setNewMinutes] = useState(10);
 
   /** ---------- Render ---------- */
-  const ended = detail ? Number(detail.endTime) <= nowSec() : false;
+ 
 
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
