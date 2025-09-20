@@ -2,22 +2,28 @@
 import { createInstance, type FhevmInstance } from "@fhevm/sdk";
 import { CHAIN_ID } from "../config";
 
-// Chọn RPC có CORS (SDK sẽ fetch trực tiếp)
-const NETWORK_URL = "https://ethereum-sepolia.publicnode.com";
+// RPC công khai cho Sepolia (CORS OK)
+const RPC = "https://ethereum-sepolia.publicnode.com";
 // Gateway testnet của Zama
-const GATEWAY_URL = "https://gateway.testnet.zama.ai";
+const GATEWAY = "https://gateway.testnet.zama.ai";
 
 let instance: FhevmInstance | null = null;
 
-/** Lấy (hoặc khởi tạo) instance SDK FHEVM */
+/**
+ * Trả về 1 instance FHEVM SDK đã khởi tạo.
+ * Dùng ép kiểu "any" để tương thích cả SDK đời cũ (rpcUrl) và đời mới (networkUrl).
+ */
 export async function getFheInstance(): Promise<FhevmInstance> {
   if (instance) return instance;
 
-  instance = await createInstance({
+  // ép kiểu để TS không than phiền về 'rpcUrl' / 'networkUrl'
+  const cfg: any = {
     chainId: CHAIN_ID,
-    networkUrl: NETWORK_URL,   // ✅ SDK mới dùng "networkUrl" (không còn rpcUrl)
-    gatewayUrl: GATEWAY_URL,
-  });
+    gatewayUrl: GATEWAY,
+    networkUrl: RPC, // SDK mới
+    rpcUrl: RPC,     // SDK cũ
+  };
 
+  instance = (await createInstance(cfg as any)) as FhevmInstance;
   return instance;
 }
