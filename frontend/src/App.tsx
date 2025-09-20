@@ -307,7 +307,7 @@ export default function App() {
   }
   useEffect(() => { refreshDetail(); }, [active]);
 
-  /** FHE readiness (just to show trạng thái nút) */
+  /** FHE readiness (status only) */
   const [fheReady, setFheReady] = useState<boolean>(false);
   useEffect(() => {
     let stop = false;
@@ -357,33 +357,40 @@ export default function App() {
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      // 4) PRE-FLIGHT SIMULATION (off-chain!) – tuyệt đối không gửi tx tới relayer
+      // 4) PRE-FLIGHT (eth_call). Nếu fail "vô danh", cho phép tiếp tục gửi tx.
       setBusy("Preflight (simulating)...");
+      let preflightBlocked = false;
       try {
-        await signer.call({ to: active, data }); // eth_call
+        await signer.call({ to: active, data }); // off-chain simulation
       } catch (simErr: any) {
         const reason = decodeRevert(simErr);
         const base =
-          simErr?.shortMessage || simErr?.info?.error?.message || simErr?.message || "Unknown error";
-        const hint = /Invalid|Cipher|Proof|PublicKey|input/i.test((reason || "") + base)
-          ? " (Có thể FHE key/proof chưa đồng bộ. Đợi 20–60s rồi thử lại.)"
-          : "";
-        throw new Error(`Preflight failed: ${base}${reason ? " | Revert: " + reason : ""}${hint}`);
+          simErr?.shortMessage || simErr?.info?.error?.message || simErr?.message || "";
+        const benignUnknown =
+          /execution reverted/i.test(base) && !reason; // không decode ra lỗi custom nào
+
+        if (benignUnknown) {
+          setToast("Preflight cảnh báo: " + base + "\nTiếp tục gửi giao dịch thật để chain đánh giá.");
+        } else {
+          preflightBlocked = true; // có lỗi custom rõ ràng → chặn
+          throw new Error(`Preflight failed: ${base}${reason ? " | Revert: " + reason : ""}`);
+        }
       }
+      if (!preflightBlocked) {
+        // 5) Estimate gas rồi gửi thẳng tới CONTRACT ĐẤU GIÁ
+        setBusy("Sending transaction…");
+        let gasLimit = 1_200_000n;
+        try {
+          const est = await signer.estimateGas({ to: active, data });
+          if (est && est > 0n) gasLimit = est + (est / 5n);
+        } catch {}
+        const tx = await signer.sendTransaction({ to: active, data, gasLimit });
+        await tx.wait();
 
-      // 5) Estimate gas rồi gửi thẳng tới CONTRACT ĐẤU GIÁ
-      setBusy("Sending transaction…");
-      let gasLimit = 1_200_000n;
-      try {
-        const est = await signer.estimateGas({ to: active, data });
-        if (est && est > 0n) gasLimit = est + (est / 5n);
-      } catch {}
-      const tx = await signer.sendTransaction({ to: active, data, gasLimit });
-      await tx.wait();
-
-      setToast(`Đã gửi bid (encrypted) = ${bid}\nTx sẽ hiển thị trên Etherscan của chính hợp đồng đang Active.`);
-      setBid("");
-      await refreshDetail();
+        setToast(`Đã gửi bid (encrypted) = ${bid}\nTx sẽ hiển thị trên Etherscan của chính hợp đồng đang Active.`);
+        setBid("");
+        await refreshDetail();
+      }
     } catch (err: any) {
       const decoded = decodeRevert(err);
       const base =
@@ -455,9 +462,13 @@ export default function App() {
       // @ts-ignore v6
       const newAddr: string = c.target;
 
+      // đọc ngay status để hiển thị và cho phép bid luôn
+      const st = await safeReadStatus(newAddr);
+
       setToast(`Deploy thành công: ${newAddr}`);
       const next = Array.from(new Set([newAddr, ...addrList]));
       setAddrList(next);
+      setListStatus((old) => ({ ...old, [newAddr]: st }));
       setActive(newAddr);
       await refreshDetail();
     } catch (err: any) {
@@ -475,8 +486,7 @@ export default function App() {
   const canSubmit =
     !!detail &&
     Number(detail.endTime) > nowSec() &&
-    !!fheReady &&
-    !busy;
+    !busy; // không khóa theo fheReady để tránh “khoá oan” trường hợp preflight cảnh báo
 
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
