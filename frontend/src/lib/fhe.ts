@@ -13,12 +13,12 @@ export async function getFheInstance(): Promise<any> {
   _fheInstancePromise = (async () => {
     const { createInstance } = await import("@fhevm/sdk");
 
-    // Một số version SDK nhận "network", số khác nhận "rpcUrl"
-    // Ta truyền cả 2, TypeScript không kêu nữa nhờ ép kiểu any
+    // Một số version SDK chỉ cần 'network', một số accept thêm 'rpcUrl'.
+    // Để chắc chắn, mình truyền cả 2 (ép kiểu any để TS không báo lỗi).
     const cfg: any = {
       chainId: CHAIN_ID,
-      network: pickRpc(),
-      rpcUrl: pickRpc(),
+      network: "sepolia",   // QUAN TRỌNG: để SDK tự nạp KMS/Validator đúng mạng
+      rpcUrl: pickRpc(),    // dự phòng
     };
 
     const instance = await createInstance(cfg);
@@ -28,7 +28,10 @@ export async function getFheInstance(): Promise<any> {
   return _fheInstancePromise;
 }
 
-export async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
+export async function waitPublicKey(
+  contractAddr: string,
+  setBusy?: (s: string | null) => void
+) {
   try {
     const inst = await getFheInstance();
     if (typeof inst.waitForPublicKey === "function") {
@@ -36,6 +39,7 @@ export async function waitPublicKey(contractAddr: string, setBusy?: (s: string |
       await inst.waitForPublicKey(contractAddr, { timeoutMs: 120_000 });
       return;
     }
+    // Fallback nếu SDK bản cũ
     for (let i = 1; i <= 8; i++) {
       try {
         setBusy?.(`Fetching FHE key… (try ${i}/8)`);
@@ -45,7 +49,7 @@ export async function waitPublicKey(contractAddr: string, setBusy?: (s: string |
         }
         break;
       } catch {
-        await new Promise((r) => setTimeout(r, 1000 * i));
+        await new Promise((r) => setTimeout(r, 800 * i));
       }
     }
   } finally {
@@ -71,7 +75,7 @@ export async function encryptBidWithRetry(
       const msg = String(err?.message || "");
       const retry = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
       if (!retry || i === 10) throw err;
-      await new Promise((r) => setTimeout(r, 800 * i));
+      await new Promise((r) => setTimeout(r, 1000 * i));
     }
   }
   throw new Error("Encryption kept failing.");

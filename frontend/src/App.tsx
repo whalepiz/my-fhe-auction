@@ -1,23 +1,14 @@
-// frontend/src/App.tsx
-import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
-import {
-  BrowserProvider,
-  Contract,
-  ContractFactory,
-  Fragment,
-  Interface,
-  JsonRpcProvider,
-} from "ethers";
-import { AUCTION_META, AUCTIONS, CHAIN_ID, RPCS } from "./config";
-import auctionArtifact from "./abi/FHEAuction.json";
-import { encryptBidWithRetry, waitPublicKey } from "./lib/fhe";
+import React, { useEffect, useMemo, useState, type FormEvent } from "react";
+import { BrowserProvider, Contract, ContractFactory, Fragment, Interface, JsonRpcProvider } from "ethers";
+import { getFheInstance, waitPublicKey, encryptBidWithRetry, decodeRevert } from "./lib/fhe";
+import auctionAbiJson from "./abi/FHEAuction.json";
+import { CHAIN_ID, AUCTIONS as ENV_AUCTIONS, AUCTION_META, RPCS } from "./config";
 
-const auctionAbi = (auctionArtifact as any).abi;
-const auctionBytecode: string | undefined = (auctionArtifact as any)?.bytecode;
+const auctionAbi = (auctionAbiJson as any).abi;
+const auctionBytecode: string | undefined = (auctionAbiJson as any)?.bytecode;
 
-// ---------------- Utils ----------------
 type Wallet = { address: string | null; chainId: number | null };
+
 type AuctionStatus = {
   item: string;
   endTime: bigint;
@@ -26,38 +17,42 @@ type AuctionStatus = {
   winningIndexEnc?: string;
 };
 
+const LS_KEY = "fhe_auctions";
+
+function isAddress(s: string) { return /^0x[a-fA-F0-9]{40}$/.test(s); }
 function nowSec() { return Math.floor(Date.now() / 1000); }
-function fmtTs(ts?: bigint) {
-  if (!ts) return "-";
-  const d = new Date(Number(ts) * 1000);
-  return d.toLocaleString();
-}
+function fmtTs(ts?: bigint) { if (!ts) return "-"; const d = new Date(Number(ts) * 1000); return d.toLocaleString(); }
 function fmtRemain(s: number) {
   if (s <= 0) return "0s";
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (d) return `${d}d ${h}h`;
-  if (h) return `${h}h ${m}m`;
-  if (m) return `${m}m ${sec}s`;
-  return `${sec}s`;
+  const m = Math.floor(s / 60), sec = s % 60; const h = Math.floor(m / 60), d = Math.floor(h / 24);
+  if (d) return `${d}d ${h % 24}h`; if (h) return `${h}h ${m % 60}m`; if (m) return `${m}m ${sec}s`; return `${sec}s`;
 }
 
+// ---- persist helpers ----
+function loadLocalAddrs(): string[] {
+  try { const raw = localStorage.getItem(LS_KEY); const arr = raw ? JSON.parse(raw) : []; return Array.isArray(arr) ? arr.filter(isAddress) : []; }
+  catch { return []; }
+}
+function saveLocalAddrs(addrs: string[]) {
+  const uniq = Array.from(new Set(addrs.filter(isAddress)));
+  localStorage.setItem(LS_KEY, JSON.stringify(uniq));
+}
+function initialAddrList(): string[] {
+  const env = (ENV_AUCTIONS || []).filter(isAddress);
+  const ls = loadLocalAddrs();
+  return Array.from(new Set([...env, ...ls]));
+}
+
+// ---- read helpers (RPC fallback) ----
 async function tryProviders<T>(call: (p: BrowserProvider | JsonRpcProvider) => Promise<T>): Promise<T> {
   let lastErr: any;
   for (const url of RPCS) {
-    try {
-      const p = new JsonRpcProvider(url);
-      return await call(p);
-    } catch (e) {
-      lastErr = e;
-    }
+    const p = new JsonRpcProvider(url);
+    try { return await call(p); } catch (e) { lastErr = e; }
   }
-  throw lastErr ?? new Error("All read providers failed");
+  throw lastErr ?? new Error("All providers failed");
 }
-
-async function readStatus(addr: string): Promise<AuctionStatus | null> {
+async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
   try {
     return await tryProviders(async (provider) => {
       const c = new Contract(addr, auctionAbi, provider);
@@ -69,26 +64,19 @@ async function readStatus(addr: string): Promise<AuctionStatus | null> {
       }
       return st;
     });
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
+// ---- UI bits ----
 function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: React.ReactNode }) {
-  const bg =
-    color === "green" ? "#103e2a" :
-    color === "orange" ? "#3f2b00" :
-    color === "blue" ? "#0b274d" : "#2a2d35";
-  const tx =
-    color === "green" ? "#50e3a4" :
-    color === "orange" ? "#ffca70" :
-    color === "blue" ? "#75a7ff" : "#cbd5e1";
+  const bg = color === "green" ? "#103e2a" : color === "orange" ? "#3f2b00" : color === "blue" ? "#0b274d" : "#2a2d35";
+  const tx = color === "green" ? "#50e3a4" : color === "orange" ? "#ffca70" : color === "blue" ? "#75a7ff" : "#cbd5e1";
   return <span style={{ background: bg, color: tx, padding: "2px 8px", borderRadius: 999, fontSize: 12 }}>{children}</span>;
 }
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
-    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300, zIndex: 9999 }}>
+    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 320, zIndex: 50 }}>
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #1f2937", fontWeight: 600 }}>Thông báo</div>
       <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>{text}</div>
       <div style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}>
@@ -98,35 +86,27 @@ function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   );
 }
 
-// ---------------- App ----------------
+// =====================================================
 export default function App() {
-  // Wallet
   const [wallet, setWallet] = useState<Wallet>({ address: null, chainId: null });
+
   async function connect() {
     const anyWin = window as any;
     if (!anyWin.ethereum) return alert("MetaMask not found");
+
     const sepoliaHex = "0xaa36a7";
     try {
-      await anyWin.ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: sepoliaHex }],
-      });
+      await anyWin.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: sepoliaHex }] });
     } catch (err: any) {
       if (err?.code === 4902) {
         await anyWin.ethereum.request({
           method: "wallet_addEthereumChain",
-          params: [{
-            chainId: sepoliaHex,
-            chainName: "Sepolia",
-            nativeCurrency: { name: "SepoliaETH", symbol: "SEP", decimals: 18 },
-            rpcUrls: RPCS,
-            blockExplorerUrls: ["https://sepolia.etherscan.io"],
-          }],
+          params: [{ chainId: sepoliaHex, chainName: "Sepolia", nativeCurrency: { name: "SepoliaETH", symbol: "SEP", decimals: 18 }, rpcUrls: RPCS, blockExplorerUrls: ["https://sepolia.etherscan.io"] }],
         });
-        await anyWin.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: sepoliaHex }],
-        });
+        await anyWin.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: sepoliaHex }] });
+      } else {
+        alert(`Please switch MetaMask to Sepolia (chainId ${CHAIN_ID}).`);
+        return;
       }
     }
     const provider = new BrowserProvider(anyWin.ethereum);
@@ -136,51 +116,50 @@ export default function App() {
     setWallet({ address: await signer.getAddress(), chainId: Number(net.chainId) });
   }
 
-  // List & active
-  const initialAddresses = useMemo(() => (AUCTIONS.length ? AUCTIONS : []), []);
+  // ---- list + persist ----
+  const initialAddresses = useMemo(initialAddrList, []);
   const [addrList, setAddrList] = useState<string[]>(initialAddresses);
   const [active, setActive] = useState<string>(initialAddresses[0] ?? "");
   const [listStatus, setListStatus] = useState<Record<string, AuctionStatus | null>>({});
   const [loadingList, setLoadingList] = useState(false);
   const [toast, setToast] = useState("");
 
+  // LƯU ngay khi danh sách đổi (đảm bảo F5 còn)
+  useEffect(() => { saveLocalAddrs(addrList); }, [addrList]);
+
   useEffect(() => {
     (async () => {
       if (!addrList.length) return;
       setLoadingList(true);
       try {
-        const results = await Promise.allSettled(addrList.map((a) => readStatus(a)));
+        const results = await Promise.allSettled(addrList.map((addr) => safeReadStatus(addr)));
         const map: Record<string, AuctionStatus | null> = {};
-        results.forEach((r, i) => {
-          map[addrList[i]] = r.status === "fulfilled" ? r.value : null;
-        });
+        results.forEach((res, i) => { const addr = addrList[i]; map[addr] = res.status === "fulfilled" ? res.value : null; });
         setListStatus(map);
-      } finally {
-        setLoadingList(false);
-      }
+      } finally { setLoadingList(false); }
     })();
   }, [addrList.join(",")]);
 
-  // Detail
+  // ---- active detail ----
   const [detail, setDetail] = useState<AuctionStatus | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
   const [bid, setBid] = useState("");
+  const [busy, setBusy] = useState<null | string>(null);
 
   async function refreshDetail() {
     if (!active) return;
-    const st = await readStatus(active);
+    const st = await safeReadStatus(active);
     setDetail(st);
     setListStatus((old) => ({ ...old, [active]: st }));
   }
   useEffect(() => { refreshDetail(); }, [active]);
 
-  // Actions
-  async function submitBid(e: FormEvent) {
-    e.preventDefault();
+  // ---- actions ----
+  async function submitBid(ev: FormEvent) {
+    ev.preventDefault();
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
-    if (Number(detail.endTime) <= nowSec()) return setToast("Phiên đã kết thúc.");
+    if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
@@ -191,36 +170,34 @@ export default function App() {
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 1) Đảm bảo public key sẵn sàng
+      // 1) chuẩn bị khoá FHE (sẽ fail nếu SDK không có KMS => đã fix bằng network:'sepolia')
       await waitPublicKey(active, setBusy);
 
-      // 2) Mã hoá (retry)
+      // 2) mã hoá input
       const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
-      // 3) Encode calldata
-      setBusy("Preflight…");
+      // 3) gửi tx (encode bằng ABI để tránh lệ thuộc typechain)
+      setBusy("Sending transaction…");
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      // 3a) Thử estimateGas / call trước (có thể fail do relayer/proof)
       let gasLimit = 1_200_000n;
       try {
         const est = await signer.estimateGas({ to: active, data });
         if (est && est > 0n) gasLimit = est + (est / 5n);
-      } catch {
-        // Quan trọng: DÙ PRELIGHT FAIL VẪN GỬI TX -> MetaMask sẽ mở
-      }
+      } catch {}
 
-      setBusy("Sending transaction…");
       const tx = await signer.sendTransaction({ to: active, data, gasLimit });
       await tx.wait();
 
-      setToast(`Đã gửi bid thành công (encrypted) = ${bid}`);
+      setToast(`Đã gửi bid = ${bid} (encrypted)`);
       setBid("");
       await refreshDetail();
     } catch (err: any) {
+      const decoded = await decodeRevert(auctionAbi, err);
       const base = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
-      setToast("Bid thất bại: " + base + "\n(Mẹo: nếu liên quan key/proof hãy thử lại sau 20–60s.)");
+      const reason = decoded ? ` | Revert: ${decoded}` : "";
+      setToast(`Bid thất bại: ${base}${reason}\n(Mẹo: nếu liên quan key/proof hãy thử lại sau 20–60s.)`);
     } finally {
       setBusy(null);
     }
@@ -229,7 +206,7 @@ export default function App() {
   async function settleAndReveal() {
     if (!active) return;
     if (!detail) return setToast("Địa chỉ không tương thích.");
-    if (Number(detail.endTime) > nowSec()) return setToast("Chưa hết hạn.");
+    if (Number(detail?.endTime || 0) > nowSec()) return setToast("Chưa hết hạn.");
 
     try {
       const anyWin = window as any;
@@ -252,7 +229,6 @@ export default function App() {
         throw new Error(`Unsupported settle signature: ${(frag as any).format("full")}`);
       }
       await tx.wait();
-
       setToast("Đã settle. Ciphertexts đã hiển thị.");
       await refreshDetail();
     } catch (err: any) {
@@ -273,7 +249,7 @@ export default function App() {
       const signer = await provider.getSigner();
 
       if (!auctionBytecode) {
-        return setToast("Thiếu bytecode trong FHEAuction.json (artifact Hardhat).");
+        return setToast("Thiếu bytecode trong FHEAuction.json. Hãy dùng artifact Hardhat (có bytecode).");
       }
 
       const factory = new ContractFactory(auctionAbi, auctionBytecode, signer);
@@ -282,10 +258,13 @@ export default function App() {
       // @ts-ignore v6
       const newAddr: string = c.target;
 
-      setToast(`Deploy thành công: ${newAddr}`);
+      // LƯU NGAY để F5 không mất
       const next = Array.from(new Set([newAddr, ...addrList]));
+      saveLocalAddrs(next);
       setAddrList(next);
       setActive(newAddr);
+
+      setToast(`Deploy thành công: ${newAddr}`);
       await refreshDetail();
     } catch (err: any) {
       const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
@@ -293,11 +272,11 @@ export default function App() {
     }
   }
 
-  // Quick-create inputs
-  const [newItem, setNewItem] = useState("Test");
+  // ---- quick create header ----
+  const [creating, setCreating] = useState(false);
+  const [newItem, setNewItem] = useState("");
   const [newMinutes, setNewMinutes] = useState(10);
 
-  // Render
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -306,26 +285,13 @@ export default function App() {
           <div style={{ fontSize: 12, opacity: 0.7 }}>Anonymous encrypted bidding on Sepolia</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input
-            placeholder="Item name"
-            value={newItem}
-            onChange={(e) => setNewItem(e.target.value)}
-            style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }}
-          />
-          <input
-            type="number"
-            min={1}
-            value={newMinutes}
-            onChange={(e) => setNewMinutes(Number(e.target.value))}
-            style={{ width: 90, padding: "6px 8px", borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }}
-          />
-          <button
-            onClick={() => createAuction(newItem, newMinutes)}
-            style={{ padding: "6px 10px", borderRadius: 8, background: "#2563eb", color: "white" }}
-          >
-            + Create auction
-          </button>
-
+          <div style={{ display: "flex", gap: 6 }}>
+            <input placeholder="Item name" value={newItem} onChange={(e) => setNewItem(e.target.value)} style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }} />
+            <input type="number" min={1} value={newMinutes} onChange={(e) => setNewMinutes(Number(e.target.value))} style={{ width: 90, padding: "6px 8px", borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }} />
+            <button onClick={async () => { if (!newItem.trim()) return setToast("Nhập tên item."); setCreating(true); try { await createAuction(newItem, newMinutes); } finally { setCreating(false); } }} disabled={creating} style={{ padding: "6px 10px", borderRadius: 8, background: "#2563eb", color: "white" }}>
+              {creating ? "Deploying…" : "+ Create auction"}
+            </button>
+          </div>
           <button onClick={connect} style={{ padding: "6px 10px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}>
             {wallet.address ? "Reconnect" : "Connect Wallet"}
           </button>
@@ -336,7 +302,7 @@ export default function App() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16 }}>
-        {/* LEFT */}
+        {/* LEFT: list */}
         <section style={{ border: "1px solid #1f2937", borderRadius: 16, background: "#0b1220" }}>
           <div style={{ padding: "12px 14px", borderBottom: "1px solid #1f2937", display: "flex", justifyContent: "space-between" }}>
             <h3 style={{ margin: 0, fontSize: 16 }}>Auctions</h3>
@@ -352,28 +318,11 @@ export default function App() {
               const endedCard = st ? Number(st.endTime) <= nowSec() : false;
 
               return (
-                <div
-                  key={addr}
-                  style={{
-                    border: "1px solid #1f2937",
-                    borderRadius: 12,
-                    padding: 12,
-                    background: isActive ? "#0e1627" : "#0b1220",
-                  }}
-                >
+                <div key={addr} style={{ border: "1px solid #1f2937", borderRadius: 12, padding: 12, background: isActive ? "#0e1627" : "#0b1220" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                    <div style={{ fontWeight: 700 }}>
-                      {st === undefined ? "loading…" : incompatible ? "(incompatible)" : meta?.title || st?.item || "(unknown)"}
-                    </div>
-                    {st && (
-                      <div>
-                        {!st.settled && !endedCard && <Badge color="green">Ongoing</Badge>}
-                        {!st.settled && endedCard && <Badge color="orange">Ended</Badge>}
-                        {st.settled && <Badge color="blue">Settled</Badge>}
-                      </div>
-                    )}
+                    <div style={{ fontWeight: 700 }}>{st === undefined ? "loading…" : incompatible ? "(incompatible)" : meta?.title || st?.item || "(unknown)"}</div>
+                    {st && <div>{!st.settled && !endedCard && <Badge color="green">Ongoing</Badge>}{!st.settled && endedCard && <Badge color="orange">Ended</Badge>}{st.settled && <Badge color="blue">Settled</Badge>}</div>}
                   </div>
-
                   <div style={{ fontSize: 12, opacity: 0.8 }}>
                     End: {incompatible ? "-" : st ? (Number(st.endTime) > nowSec() ? "ongoing" : "ended") : "-"} · {st ? fmtTs(st.endTime) : "-"}
                     {st && Number(st.endTime) > nowSec() && <> · <b>{fmtRemain(Number(st.endTime) - nowSec())}</b></>}
@@ -381,17 +330,9 @@ export default function App() {
                   <div style={{ fontSize: 12, opacity: 0.8 }}>Settled: {incompatible ? "-" : st?.settled ? "true" : "false"}</div>
 
                   <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
-                    <button onClick={() => setActive(addr)} disabled={incompatible} style={{ padding: "6px 10px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}>
-                      Open
-                    </button>
-                    <a href={`https://sepolia.etherscan.io/address/${addr}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#93c5fd" }}>
-                      Etherscan
-                    </a>
-                    <code
-                      title="Copy"
-                      onClick={() => navigator.clipboard?.writeText(addr).then(() => setToast("Đã copy địa chỉ hợp đồng."))}
-                      style={{ fontSize: 11, opacity: 0.7, cursor: "pointer" }}
-                    >
+                    <button onClick={() => setActive(addr)} disabled={incompatible} style={{ padding: "6px 10px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}>Open</button>
+                    <a href={`https://sepolia.etherscan.io/address/${addr}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#93c5fd" }}>Etherscan</a>
+                    <code title="Copy" onClick={() => navigator.clipboard?.writeText(addr).then(() => setToast("Đã copy địa chỉ hợp đồng."))} style={{ fontSize: 11, opacity: 0.7, cursor: "pointer" }}>
                       {addr.slice(0, 8)}…{addr.slice(-6)}
                     </code>
                   </div>
@@ -401,7 +342,7 @@ export default function App() {
           </div>
         </section>
 
-        {/* RIGHT */}
+        {/* RIGHT: active */}
         {!!active && (
           <section style={{ border: "1px solid #1f2937", borderRadius: 16, background: "#0b1220" }}>
             <div style={{ padding: "12px 14px", borderBottom: "1px solid #1f2937", display: "flex", justifyContent: "space-between" }}>
@@ -413,9 +354,7 @@ export default function App() {
               <div><b>Item:</b> {detail?.item ?? "-"}</div>
               <div>
                 <b>End time:</b> {detail ? fmtTs(detail.endTime) : "-"} ·{" "}
-                {detail ? (Number(detail.endTime) > nowSec()
-                  ? <>ongoing · <b>{fmtRemain(Number(detail.endTime) - nowSec())}</b></>
-                  : "ended") : "-"}
+                {detail ? (Number(detail.endTime) > nowSec() ? <>ongoing · <b>{fmtRemain(Number(detail.endTime) - nowSec())}</b></> : "ended") : "-"}
               </div>
               <div><b>Settled:</b> {detail?.settled ? "true" : "false"}</div>
               {detail?.settled && (
@@ -428,31 +367,19 @@ export default function App() {
               <form onSubmit={submitBid} style={{ display: "grid", gap: 10, maxWidth: 520, marginTop: 8 }}>
                 <label style={{ display: "grid", gap: 6 }}>
                   Your bid (uint32)
-                  <input
-                    type="number"
-                    min={0}
-                    step={1}
-                    value={bid}
-                    onChange={(e) => setBid(e.target.value)}
+                  <input type="number" min={0} step={1} value={bid} onChange={(e) => setBid(e.target.value)}
                     disabled={!detail || Number(detail?.endTime || 0) <= nowSec() || !!busy}
-                    style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }}
-                  />
+                    style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }} />
                 </label>
-                <button
-                  type="submit"
-                  disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec()}
-                  style={{ padding: "10px 16px", borderRadius: 8, background: "#2563eb", color: "white" }}
-                >
+                <button type="submit" disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec()}
+                  style={{ padding: "10px 16px", borderRadius: 8, background: "#2563eb", color: "white" }}>
                   {busy ? busy : "Submit encrypted bid"}
                 </button>
               </form>
 
               <div style={{ marginTop: 10 }}>
-                <button
-                  onClick={settleAndReveal}
-                  disabled={!detail || !(Number(detail?.endTime || 0) <= nowSec())}
-                  style={{ padding: "8px 14px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}
-                >
+                <button onClick={settleAndReveal} disabled={!detail || !(Number(detail?.endTime || 0) <= nowSec())}
+                  style={{ padding: "8px 14px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}>
                   Settle & reveal
                 </button>
               </div>
