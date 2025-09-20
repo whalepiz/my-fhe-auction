@@ -1,5 +1,5 @@
 // frontend/src/App.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import {
   BrowserProvider,
@@ -105,7 +105,6 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
 async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
   const inst = await getFheInstance();
   setBusy?.("Chuẩn bị public key FHE…");
-  // chờ key sẵn sàng tối đa ~90s (polling 10 lần)
   for (let i = 1; i <= 10; i++) {
     try {
       if ((inst as any).waitForPublicKey) {
@@ -140,7 +139,6 @@ async function encryptBid(
       return enc;
     } catch (err: any) {
       const msg = String(err?.message || "");
-      // lỗi relayer/gateway → chờ retry
       if (!/500|timeout|failed|public key|gateway|relayer/i.test(msg) || i === 8) {
         setBusy?.(null);
         throw err;
@@ -269,7 +267,7 @@ export default function App() {
   }
   useEffect(() => { refreshDetail(); }, [active]);
 
-  /** --------- SUBMIT BID (đã sửa preflight) ---------- */
+  /** --------- SUBMIT BID ---------- */
   async function submitBid(e: FormEvent) {
     e.preventDefault();
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
@@ -290,12 +288,12 @@ export default function App() {
       // 1) Key
       await waitPublicKey(active, setBusy);
 
-      // 2) Encrypt (lần 1) và tự build calldata
+      // 2) Encrypt 1 + calldata
       const enc1 = await encryptBid(active, me, BigInt(bid), setBusy);
       const iface = new Interface(auctionAbi);
       const data1 = iface.encodeFunctionData("bid", [enc1.handles[0], enc1.inputProof]);
 
-      // 3) Preflight ETH_CALL với from = me (tránh sai from)
+      // 3) Preflight (ép from = me)
       setBusy("Preflight…");
       try {
         await (provider as any).send("eth_call", [{ to: active, from: me, data: data1 }, "latest"]);
@@ -307,7 +305,7 @@ export default function App() {
         throw new Error("Preflight failed: " + base + reason);
       }
 
-      // 4) Encrypt lại (proof mới) rồi gửi tx raw (luôn bật MetaMask)
+      // 4) Encrypt 2 + gửi tx (MetaMask chắc chắn mở)
       const enc2 = await encryptBid(active, me, BigInt(bid), setBusy);
       const data2 = iface.encodeFunctionData("bid", [enc2.handles[0], enc2.inputProof]);
 
@@ -317,7 +315,6 @@ export default function App() {
         const est = await (signer as any).estimateGas({ to: active, data: data2 });
         if (est && est > 0n) gasLimit = est + est / 5n;
       } catch {}
-
       const tx = await signer.sendTransaction({ to: active, data: data2, gasLimit });
       await tx.wait();
     };
@@ -328,7 +325,6 @@ export default function App() {
       setBid("");
       await refreshDetail();
     } catch (err: any) {
-      // thử lại 1 lần nếu preflight dính unknown/proof
       const msg = String(err?.message || "");
       if (/Preflight failed|proof|PublicKey|execution reverted|unknown/i.test(msg)) {
         try {
@@ -420,13 +416,9 @@ export default function App() {
     }
   }
 
-  /** ---------- Quick create ---------- */
   const [creating, setCreating] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [newMinutes, setNewMinutes] = useState(10);
-
-  /** ---------- Render ---------- */
-  const ended = detail ? Number(detail.endTime) <= nowSec() : false;
 
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>

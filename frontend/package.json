@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fhevm/sdk": "^0.7.0-20",
     "@zama-fhe/relayer-sdk": "^0.2.0",
     "ethers": "^6.15.0",
     "react": "^19.1.1",
