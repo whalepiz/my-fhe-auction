@@ -33,17 +33,16 @@ const RPCS = [
   "https://rpc2.sepolia.org",
 ];
 
-const PREFLIGHT = (import.meta as any).env?.VITE_PREFLIGHT === "1"; // tắt mặc định
 const LS_KEY = "fhe_auctions";
+const nowSec = () => Math.floor(Date.now() / 1000);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
 
 function fmtTs(ts?: bigint) {
   if (!ts) return "-";
   const d = new Date(Number(ts) * 1000);
   return d.toLocaleString();
 }
-const nowSec = () => Math.floor(Date.now() / 1000);
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
 function fmtRemain(s: number) {
   if (s <= 0) return "0s";
   const d = Math.floor(s / 86400);
@@ -108,7 +107,7 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
       return st;
     });
   } catch {
-    return null; // incompatible / decode fail
+    return null;
   }
 }
 
@@ -116,13 +115,11 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
 async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
   try {
     const inst = await getFheInstance();
-    // Nhiều SDK có waitForPublicKey -> dùng nếu có
     if ((inst as any)?.waitForPublicKey) {
       setBusy?.("Preparing FHE key…");
       await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 60000 });
       return;
     }
-    // Fallback: chọc getPublicKey vài lần
     for (let i = 1; i <= 5; i++) {
       try {
         setBusy?.(`Fetching FHE key… (try ${i}/5)`);
@@ -167,7 +164,7 @@ async function encryptBidWithRetry(
       setBusy?.(`Encrypting (try ${i}/6)…`);
       const buf = inst.createEncryptedInput(contractAddr, signerAddr);
       buf.add32(value);
-      const enc = await buf.encrypt(); // gọi relayer để nhận inputProof
+      const enc = await buf.encrypt();
       return enc;
     } catch (err: any) {
       const msg = String(err?.message || "");
@@ -199,32 +196,6 @@ function decodeRevert(err: any): string | null {
   }
 }
 
-/** ---------- Quick preflight (best-effort, không chặn gửi) ---------- */
-async function quickPreflight(
-  to: string,
-  data: string,
-  from: string,
-  setBusy?: (s: string | null) => void
-) {
-  if (!PREFLIGHT) return true; // tắt mặc định
-  for (let i = 1; i <= 3; i++) {
-    setBusy?.(`Preflight… (try ${i}/3)`);
-    for (const url of RPCS) {
-      try {
-        const p = new JsonRpcProvider(url);
-        await p.call({ to, data, from });
-        setBusy?.(null);
-        return true;
-      } catch {
-        // nếu RPC/eth_call fail vẫn thử cái khác
-      }
-    }
-    await sleep(700);
-  }
-  setBusy?.(null);
-  return false; // cho gửi tiếp, không kẹt UI
-}
-
 /** ---------- Small UI bits ---------- */
 function Badge({
   color,
@@ -234,26 +205,14 @@ function Badge({
   children: React.ReactNode;
 }) {
   const bg =
-    color === "green"
-      ? "#103e2a"
-      : color === "orange"
-      ? "#3f2b00"
-      : color === "blue"
-      ? "#0b274d"
-      : "#2a2d35";
+    color === "green" ? "#103e2a" :
+    color === "orange" ? "#3f2b00" :
+    color === "blue" ? "#0b274d" : "#2a2d35";
   const tx =
-    color === "green"
-      ? "#50e3a4"
-      : color === "orange"
-      ? "#ffca70"
-      : color === "blue"
-      ? "#75a7ff"
-      : "#cbd5e1";
-  return (
-    <span style={{ background: bg, color: tx, padding: "2px 8px", borderRadius: 999, fontSize: 12 }}>
-      {children}
-    </span>
-  );
+    color === "green" ? "#50e3a4" :
+    color === "orange" ? "#ffca70" :
+    color === "blue" ? "#75a7ff" : "#cbd5e1";
+  return <span style={{ background: bg, color: tx, padding: "2px 8px", borderRadius: 999, fontSize: 12 }}>{children}</span>;
 }
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
@@ -372,6 +331,27 @@ export default function App() {
   }, [active]);
 
   /** Actions */
+  async function doSendBid(
+    signer: any,
+    contractAddr: string,
+    handle: any,
+    proof: any
+  ) {
+    const c = new Contract(contractAddr, auctionAbi, signer);
+    // ethers v6: getFunction trả về callable, cast any để né TS
+    const bidFn = (c as any).getFunction("bid") as any;
+
+    let gasLimit = 3_000_000n;
+    try {
+      const iface = new Interface(auctionAbi);
+      const data = iface.encodeFunctionData("bid", [handle, proof]);
+      const est = await signer.estimateGas({ to: contractAddr, data });
+      if (est && est > 0n) gasLimit = est + (est / 5n);
+    } catch {}
+    const tx = await bidFn(handle, proof, { gasLimit });
+    return tx.wait();
+  }
+
   async function submitBid(ev: React.FormEvent) {
     ev.preventDefault();
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
@@ -379,7 +359,7 @@ export default function App() {
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
     const ended = detail ? Number(detail.endTime) <= nowSec() : false;
     if (ended) return setToast("Phiên đã kết thúc.");
-    if (!fheReady) return setToast("FHE key chưa sẵn sàng, thử lại sau vài giây.");
+    if (!fheReady) return setToast("FHE key chưa sẵn sàng, thử lại sau ít giây.");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
@@ -393,29 +373,33 @@ export default function App() {
       // 1) Đảm bảo public key
       await waitPublicKey(active, setBusy);
 
-      // 2) Encrypt -> nhận inputProof (đừng để treo lâu)
-      const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
+      // 2) Encrypt
+      const enc1 = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
-      // 3) Encode calldata
-      const iface = new Interface(auctionAbi);
-      const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
-
-      // 4) Preflight nhanh (không chặn gửi nếu fail)
-      await quickPreflight(active, data, me, setBusy);
-
-      // 5) Gửi thật — gasLimit cao để tránh out-of-gas do precompiles
+      // 3) Gửi lần 1
       setBusy("Sending transaction…");
-      let gasLimit = 3_000_000n;
       try {
-        const est = await signer.estimateGas({ to: active, data });
-        if (est && est > 0n) gasLimit = est + (est / 5n);
-      } catch {}
-      const tx = await signer.sendTransaction({ to: active, data, gasLimit });
-      await tx.wait();
-
-      setToast(`Đã gửi bid (encrypted) = ${bid}`);
-      setBid("");
-      await refreshDetail();
+        await doSendBid(signer, active, enc1.handles[0], enc1.inputProof);
+        setToast(`Đã gửi bid (encrypted) = ${bid}`);
+        setBid("");
+        await refreshDetail();
+        setBusy(null);
+        return;
+      } catch (err1: any) {
+        // 4) Nếu revert -> re-encrypt & gửi lại 1 lần (proof mới)
+        const decoded1 = decodeRevert(err1);
+        const base1 =
+          err1?.shortMessage || err1?.info?.error?.message || err1?.message || "";
+        if (!/revert|Invalid|Proof|PublicKey|input|CALL_EXCEPTION/i.test((base1 || "") + (decoded1 || ""))) {
+          throw err1; // lỗi khác -> ném ra
+        }
+        setBusy("Retrying with fresh proof…");
+        const enc2 = await encryptBidWithRetry(active, me, BigInt(bid));
+        await doSendBid(signer, active, enc2.handles[0], enc2.inputProof);
+        setToast(`Đã gửi bid (encrypted) = ${bid} (retry)`);
+        setBid("");
+        await refreshDetail();
+      }
     } catch (err: any) {
       const decoded = decodeRevert(err);
       const base =
@@ -424,11 +408,7 @@ export default function App() {
       const txHash =
         err?.transactionHash || err?.receipt?.transactionHash || err?.hash || "";
       const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
-      const hint =
-        /execution reverted|InvalidInput|Cipher|Proof|PublicKey|Invalid|input|simulation/i.test((base || "") + reason)
-          ? " (Thử lại: bấm Submit ngay sau khi ô nút hiển thị “Sending…”; đừng đợi quá lâu để tránh proof hết hạn.)"
-          : "";
-      setToast("Bid thất bại: " + base + reason + hint + link);
+      setToast("Bid thất bại: " + base + reason + link);
     } finally {
       setBusy(null);
     }
@@ -453,10 +433,10 @@ export default function App() {
 
       const inputs = (frag as any).inputs ?? [];
       let tx;
-      if (inputs.length === 0) tx = await c.settle();
+      if (inputs.length === 0) tx = await (c as any).settle();
       else if (inputs.length === 1 && inputs[0].type === "address[]") {
         const me = await signer.getAddress();
-        tx = await c.settle([me]);
+        tx = await (c as any).settle([me]);
       } else {
         throw new Error(`Unsupported settle signature: ${(frag as any).format("full")}`);
       }
