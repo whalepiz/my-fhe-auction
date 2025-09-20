@@ -63,22 +63,16 @@ function fmtRemain(s: number) {
   return `${sec}s`;
 }
 
-function pickRpc() {
-  return RPCS[Math.floor(Math.random() * RPCS.length)];
-}
-
 async function tryProviders<T>(
   call: (p: BrowserProvider | JsonRpcProvider) => Promise<T>
 ): Promise<T> {
   let lastErr: any;
-  for (let i = 0; i < RPCS.length; i++) {
-    const url = RPCS[i];
+  for (const url of RPCS) {
     const p = new JsonRpcProvider(url);
     try {
       return await call(p);
     } catch (e) {
       lastErr = e;
-      continue;
     }
   }
   throw lastErr ?? new Error("All providers failed");
@@ -103,7 +97,6 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
       err?.value === "0x" ||
       /bad data|invalid|selector|reverted/i.test(msg)
     ) {
-      // Không đúng ABI/contract → đánh dấu incompatible
       return null;
     }
     return null;
@@ -112,7 +105,6 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
 
 /* ---------- Persist local auctions ---------- */
 const LS_KEY = "fhe_auctions";
-
 function loadLocalAddrs(): string[] {
   try {
     const raw = localStorage.getItem(LS_KEY);
@@ -134,7 +126,7 @@ function initialAddrList(): string[] {
   return Array.from(new Set([...env, ...ls]));
 }
 
-/* ---------- Small UI bits ---------- */
+/* ---------- UI helpers ---------- */
 function Badge({
   color,
   children,
@@ -172,7 +164,6 @@ function Badge({
     </span>
   );
 }
-
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
@@ -348,14 +339,14 @@ export default function App() {
       // 1) Đảm bảo public key
       await waitForPublicKey(active);
 
-      // 2) Encrypt + lấy input-proof (relayer)
+      // 2) Encrypt + proof
       const { handles, inputProof } = await encryptUint32WithProof(
         active,
         me,
         BigInt(bid)
       );
 
-      // 3) Encode calldata & gửi tx
+      // 3) Encode calldata & send
       setBusy("Sending transaction…");
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [handles[0], inputProof]);
@@ -466,10 +457,10 @@ export default function App() {
 
       setToast(`Deploy thành công: ${newAddr}`);
 
-      // Thêm vào đầu danh sách + chọn active + refresh chi tiết (KHÔNG cần bấm Refresh status)
+      // Thêm + chọn active + refresh ngay (không cần bấm Refresh)
       setAddrList((prev) => Array.from(new Set([newAddr, ...prev])));
       setActive(newAddr);
-      await sleep(800); // chút xíu cho RPC index kịp
+      await sleep(800);
       await refreshDetail();
     } catch (err: any) {
       const msg =
@@ -697,7 +688,7 @@ export default function App() {
                     >
                       Etherscan
                     </a>
-                    {addr && (
+                    {!!addr && (
                       <code
                         title="Copy"
                         onClick={() =>
