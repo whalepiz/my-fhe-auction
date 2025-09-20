@@ -327,12 +327,10 @@ export default function App() {
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      // 4) preflight bằng staticCall → nếu revert thì decode & dừng
+      // 4) PRE-FLIGHT bằng signer.call (mô phỏng đúng msg.sender)
       setBusy("Preflight…");
-      const cRW = new Contract(active, auctionAbi, signer);
       try {
-        // @ts-ignore v6 staticCall
-        await cRW.bid.staticCall(enc.handles[0], enc.inputProof);
+        await signer.call({ to: active, data }); // dùng địa chỉ signer làm `from`
       } catch (e: any) {
         const reason = decodeRevert(e) || e?.shortMessage || e?.message || "execution reverted";
         setBusy(null);
