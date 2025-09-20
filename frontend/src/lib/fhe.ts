@@ -1,11 +1,9 @@
 // frontend/src/lib/fhe.ts
 import { CHAIN_ID, RPCS } from "../config";
 
-// Giữ 1 instance SDK trong suốt vòng đời trang
 let _fheInstancePromise: Promise<any> | null = null;
 
-// Một RPC ổn định cho SDK; khi fail, SDK tự lo phần fetch/proof qua relayer
-function pickNetworkUrl(): string {
+function pickRpc(): string {
   return RPCS[0] || "https://ethereum-sepolia.publicnode.com";
 }
 
@@ -14,18 +12,22 @@ export async function getFheInstance(): Promise<any> {
 
   _fheInstancePromise = (async () => {
     const { createInstance } = await import("@fhevm/sdk");
-    // API đúng của SDK bản mới: dùng networkUrl (không phải rpcUrl)
-    const instance = await createInstance({
-      networkUrl: pickNetworkUrl(),
+
+    // Một số version SDK nhận "network", số khác nhận "rpcUrl"
+    // Ta truyền cả 2, TypeScript không kêu nữa nhờ ép kiểu any
+    const cfg: any = {
       chainId: CHAIN_ID,
-    });
+      network: pickRpc(),
+      rpcUrl: pickRpc(),
+    };
+
+    const instance = await createInstance(cfg);
     return instance;
   })();
 
   return _fheInstancePromise;
 }
 
-// Chờ public key có sẵn (nếu SDK hỗ trợ), fallback getPublicKey
 export async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) => void) {
   try {
     const inst = await getFheInstance();
@@ -34,7 +36,6 @@ export async function waitPublicKey(contractAddr: string, setBusy?: (s: string |
       await inst.waitForPublicKey(contractAddr, { timeoutMs: 120_000 });
       return;
     }
-    // Fallback loop
     for (let i = 1; i <= 8; i++) {
       try {
         setBusy?.(`Fetching FHE key… (try ${i}/8)`);
@@ -76,7 +77,7 @@ export async function encryptBidWithRetry(
   throw new Error("Encryption kept failing.");
 }
 
-export function decodeRevert(abi: any[], err: any): string | null {
+export async function decodeRevert(abi: any[], err: any): Promise<string | null> {
   try {
     const data =
       err?.data?.data ||
