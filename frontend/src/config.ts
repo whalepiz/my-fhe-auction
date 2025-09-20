@@ -3,12 +3,17 @@
 /** Chain: Sepolia */
 export const CHAIN_ID = 11155111 as const;
 
+/** RPC endpoints dùng để đọc fallback trong trình duyệt (đã bật CORS) */
+export const RPCS: string[] = [
+  "https://eth-sepolia.public.blastapi.io",
+  "https://endpoints.omniatech.io/v1/eth/sepolia/public",
+  "https://ethereum-sepolia.publicnode.com",
+];
+
 /**
  * Nguồn danh sách địa chỉ auctions:
  * 1) Biến môi trường VERCEL/Local: VITE_AUCTIONS="0xabc...,0xdef...,0x123..."
  * 2) Nếu không set biến môi trường, dùng mảng AUCTIONS dưới đây.
- *
- * => Nhờ vậy mỗi lần deploy Vercel cũng KHÔNG mất danh sách.
  */
 
 function parseEnvAuctions(): string[] {
@@ -19,24 +24,21 @@ function parseEnvAuctions(): string[] {
     .filter((s) => /^0x[a-fA-F0-9]{40}$/.test(s));
 }
 
-/** 👉👉 Hãy điền các địa chỉ auction của bạn vào mảng này (nếu chưa dùng env). */
+/** 👉👉 Điền sẵn địa chỉ nếu bạn chưa dùng env VITE_AUCTIONS */
 export const AUCTIONS: string[] = (() => {
   const fromEnv = parseEnvAuctions();
   if (fromEnv.length) return fromEnv;
-
-  // DỰ PHÒNG: điền sẵn những địa chỉ bạn muốn hiển thị mặc định
   return [
-    // Ví dụ:
-    // "0x556111cc5B8Bce0000000000000000000000000",
     // "0xc343AD8741E9395b46165479388C6c81D63b2b44",
+    // "0x556111cc5B8Bce8c59B000000000000000000000",
   ];
 })();
 
 /** (Tuỳ chọn) Metadata hiển thị đẹp cho từng auction */
 export const AUCTION_META = {
-  // "0x556111cc5B8Bce0000000000000000000000000": {
-  //   title: "Test",
-  //   image: "https://picsum.photos/seed/test/300/180",
+  // "0xc343AD8741E9395b46165479388C6c81D63b2b44": {
+  //   title: "Rare NFT #1",
+  //   image: "https://picsum.photos/seed/auction1/300/180",
   //   description: "Demo FHE auction",
   // },
 } as const;
