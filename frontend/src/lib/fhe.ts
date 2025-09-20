@@ -1,104 +1,93 @@
 // frontend/src/lib/fhe.ts
-import { CHAIN_ID, RPCS } from "../config";
+import { CHAIN_ID } from "../config";
 
-let _fheInstancePromise: Promise<any> | null = null;
-
-function pickRpc(): string {
-  return RPCS[0] || "https://ethereum-sepolia.publicnode.com";
+/**
+ * Quan trọng:
+ * Một số bundle trên trình duyệt thiếu "global" → polyfill để tránh black screen.
+ */
+// @ts-ignore
+if (typeof (globalThis as any).global === "undefined") {
+  // @ts-ignore
+  (globalThis as any).global = globalThis;
 }
 
+let _instancePromise: Promise<any> | null = null;
+
+/** Lazy create FHE instance chuẩn cho Sepolia */
 export async function getFheInstance(): Promise<any> {
-  if (_fheInstancePromise) return _fheInstancePromise;
+  if (_instancePromise) return _instancePromise;
 
-  _fheInstancePromise = (async () => {
-    const { createInstance } = await import("@fhevm/sdk");
+  _instancePromise = (async () => {
+    // import động để giảm lỗi type ở môi trường build
+    const mod: any = await import("@fhevm/sdk");
+    const createInstance: any = mod?.createInstance ?? mod?.default?.createInstance ?? mod?.default;
 
-    // Một số version SDK chỉ cần 'network', một số accept thêm 'rpcUrl'.
-    // Để chắc chắn, mình truyền cả 2 (ép kiểu any để TS không báo lỗi).
-    const cfg: any = {
+    // Tạo instance cho Sepolia. SDK tự biết KMS/Relayer của Sepolia.
+    const inst = await createInstance({
       chainId: CHAIN_ID,
-      network: "sepolia",   // QUAN TRỌNG: để SDK tự nạp KMS/Validator đúng mạng
-      rpcUrl: pickRpc(),    // dự phòng
-    };
+      network: "sepolia",
+    });
 
-    const instance = await createInstance(cfg);
-    return instance;
+    return inst;
   })();
 
-  return _fheInstancePromise;
+  return _instancePromise;
 }
 
-export async function waitPublicKey(
+/** Ngủ */
+export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Đợi public key cho contract, có retry */
+export async function waitForPublicKey(
   contractAddr: string,
-  setBusy?: (s: string | null) => void
-) {
-  try {
-    const inst = await getFheInstance();
-    if (typeof inst.waitForPublicKey === "function") {
-      setBusy?.("Preparing FHE key…");
-      await inst.waitForPublicKey(contractAddr, { timeoutMs: 120_000 });
-      return;
-    }
-    // Fallback nếu SDK bản cũ
-    for (let i = 1; i <= 8; i++) {
-      try {
-        setBusy?.(`Fetching FHE key… (try ${i}/8)`);
-        if (typeof inst.getPublicKey === "function") {
-          await inst.getPublicKey(contractAddr);
-          return;
-        }
-        break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 800 * i));
-      }
-    }
-  } finally {
-    setBusy?.(null);
+  timeoutMs = 120_000
+): Promise<void> {
+  const inst = await getFheInstance();
+
+  // Nếu SDK có sẵn waitForPublicKey thì dùng
+  if (typeof inst?.waitForPublicKey === "function") {
+    await inst.waitForPublicKey(contractAddr, { timeoutMs });
+    return;
   }
+
+  // Fallback poll getPublicKey
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      if (typeof inst?.getPublicKey === "function") {
+        await inst.getPublicKey(contractAddr);
+        return;
+      }
+      // nếu SDK quá cũ → thoát vòng cho có thông báo
+      break;
+    } catch {
+      await sleep(1500);
+    }
+  }
+  throw new Error("Public key not ready");
 }
 
+/** Mã hoá một giá bid uint32 kèm retry */
 export async function encryptBidWithRetry(
   contractAddr: string,
   signerAddr: string,
   value: bigint,
-  setBusy?: (s: string | null) => void
-): Promise<{ handles: string[]; inputProof: string }> {
+  tries = 8
+): Promise<any> {
   const inst = await getFheInstance();
-  for (let i = 1; i <= 10; i++) {
+
+  for (let i = 1; i <= tries; i++) {
     try {
-      setBusy?.(`Encrypting (try ${i}/10)…`);
       const buf = inst.createEncryptedInput(contractAddr, signerAddr);
       buf.add32(value);
       const enc = await buf.encrypt();
       return enc;
-    } catch (err: any) {
-      const msg = String(err?.message || "");
-      const retry = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
-      if (!retry || i === 10) throw err;
-      await new Promise((r) => setTimeout(r, 1000 * i));
+    } catch (e: any) {
+      const msg = String(e?.message || e || "");
+      // lỗi KMS/relayer/public-key thường có ở lần đầu → retry luỹ tiến
+      if (i === tries) throw new Error(msg || "encrypt failed");
+      await sleep(800 * i);
     }
   }
-  throw new Error("Encryption kept failing.");
-}
-
-export async function decodeRevert(abi: any[], err: any): Promise<string | null> {
-  try {
-    const data =
-      err?.data?.data ||
-      err?.error?.data ||
-      err?.error?.error?.data ||
-      err?.info?.error?.data ||
-      err?.data ||
-      err?.receipt?.revertReason ||
-      null;
-    if (!data) return null;
-    const { Interface } = await import("ethers");
-    const iface = new Interface(abi);
-    const parsed = iface.parseError(data);
-    if (!parsed) return null;
-    const args = parsed?.args ? JSON.stringify(parsed.args) : "";
-    return `${parsed.name}${args ? " " + args : ""}`;
-  } catch {
-    return null;
-  }
+  throw new Error("encrypt failed");
 }
