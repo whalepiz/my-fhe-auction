@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import {
   BrowserProvider,
   Contract,
@@ -17,6 +18,7 @@ const auctionBytecode: string | undefined = (auctionAbiJson as any)?.bytecode;
 
 /** ---------- Types ---------- */
 type Wallet = { address: string | null; chainId: number | null };
+
 type AuctionStatus = {
   item: string;
   endTime: bigint;
@@ -34,6 +36,7 @@ const RPCS = [
 ];
 
 const LS_KEY = "fhe_auctions";
+
 const nowSec = () => Math.floor(Date.now() / 1000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
@@ -43,6 +46,7 @@ function fmtTs(ts?: bigint) {
   const d = new Date(Number(ts) * 1000);
   return d.toLocaleString();
 }
+
 function fmtRemain(s: number) {
   if (s <= 0) return "0s";
   const d = Math.floor(s / 86400);
@@ -88,7 +92,6 @@ async function tryProviders<T>(
       return await call(p);
     } catch (e: any) {
       lastErr = e;
-      continue;
     }
   }
   throw lastErr ?? new Error("All providers failed");
@@ -106,7 +109,15 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
       }
       return st;
     });
-  } catch {
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (
+      err?.code === "BAD_DATA" ||
+      err?.value === "0x" ||
+      /bad data|invalid|selector|reverted/i.test(msg)
+    ) {
+      return null;
+    }
     return null;
   }
 }
@@ -117,41 +128,26 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
     const inst = await getFheInstance();
     if ((inst as any)?.waitForPublicKey) {
       setBusy?.("Preparing FHE key…");
-      await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 60000 });
+      await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 120000 });
       return;
     }
-    for (let i = 1; i <= 5; i++) {
+    for (let i = 1; i <= 8; i++) {
       try {
-        setBusy?.(`Fetching FHE key… (try ${i}/5)`);
+        setBusy?.(`Fetching FHE key… (try ${i}/8)`);
         if ((inst as any)?.getPublicKey) {
           await (inst as any).getPublicKey(contractAddr);
           return;
         }
         break;
       } catch {
-        await sleep(800 * i);
+        await sleep(1500 * i);
       }
     }
   } finally {
     setBusy?.(null);
   }
 }
-async function isFheReady(contractAddr: string): Promise<boolean> {
-  try {
-    const inst = await getFheInstance();
-    if ((inst as any)?.waitForPublicKey) {
-      await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 1 });
-      return true;
-    }
-    if ((inst as any)?.getPublicKey) {
-      await (inst as any).getPublicKey(contractAddr);
-      return true;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
+
 async function encryptBidWithRetry(
   contractAddr: string,
   signerAddr: string,
@@ -159,9 +155,9 @@ async function encryptBidWithRetry(
   setBusy?: (s: string | null) => void
 ) {
   const inst = await getFheInstance();
-  for (let i = 1; i <= 6; i++) {
+  for (let i = 1; i <= 10; i++) {
     try {
-      setBusy?.(`Encrypting (try ${i}/6)…`);
+      setBusy?.(`Encrypting (try ${i}/10)…`);
       const buf = inst.createEncryptedInput(contractAddr, signerAddr);
       buf.add32(value);
       const enc = await buf.encrypt();
@@ -169,12 +165,13 @@ async function encryptBidWithRetry(
     } catch (err: any) {
       const msg = String(err?.message || "");
       const retriable = /REQUEST FAILED|500|public key|gateway|relayer|fetch|timeout/i.test(msg);
-      if (!retriable || i === 6) throw err;
-      await sleep(900 * i);
+      if (!retriable || i === 10) throw err;
+      await sleep(1000 * i);
     }
   }
   throw new Error("FHE key not ready.");
 }
+
 function decodeRevert(err: any): string | null {
   try {
     const data =
@@ -197,13 +194,7 @@ function decodeRevert(err: any): string | null {
 }
 
 /** ---------- Small UI bits ---------- */
-function Badge({
-  color,
-  children,
-}: {
-  color: "green" | "gray" | "orange" | "blue";
-  children: React.ReactNode;
-}) {
+function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: React.ReactNode }) {
   const bg =
     color === "green" ? "#103e2a" :
     color === "orange" ? "#3f2b00" :
@@ -217,7 +208,7 @@ function Badge({
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
-    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300, zIndex: 50 }}>
+    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300, zIndex: 9999 }}>
       <div style={{ padding: "10px 12px", borderBottom: "1px solid #1f2937", fontWeight: 600 }}>Thông báo</div>
       <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>{text}</div>
       <div style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}>
@@ -316,50 +307,36 @@ export default function App() {
   }
   useEffect(() => { refreshDetail(); }, [active]);
 
-  /** FHE Readiness */
+  /** FHE readiness (just to show trạng thái nút) */
   const [fheReady, setFheReady] = useState<boolean>(false);
   useEffect(() => {
     let stop = false;
     async function tick() {
       if (!active) return;
-      const ok = await isFheReady(active);
-      if (!stop) setFheReady(ok);
+      try {
+        const inst = await getFheInstance();
+        if ((inst as any)?.getPublicKey) {
+          await (inst as any).getPublicKey(active);
+          if (!stop) setFheReady(true);
+        } else {
+          if (!stop) setFheReady(true);
+        }
+      } catch {
+        if (!stop) setFheReady(false);
+      }
     }
     tick();
-    const id = setInterval(tick, 2000);
+    const id = setInterval(tick, 2500);
     return () => { stop = true; clearInterval(id); };
   }, [active]);
 
   /** Actions */
-  async function doSendBid(
-    signer: any,
-    contractAddr: string,
-    handle: any,
-    proof: any
-  ) {
-    const c = new Contract(contractAddr, auctionAbi, signer);
-    // ethers v6: getFunction trả về callable, cast any để né TS
-    const bidFn = (c as any).getFunction("bid") as any;
-
-    let gasLimit = 3_000_000n;
-    try {
-      const iface = new Interface(auctionAbi);
-      const data = iface.encodeFunctionData("bid", [handle, proof]);
-      const est = await signer.estimateGas({ to: contractAddr, data });
-      if (est && est > 0n) gasLimit = est + (est / 5n);
-    } catch {}
-    const tx = await bidFn(handle, proof, { gasLimit });
-    return tx.wait();
-  }
-
-  async function submitBid(ev: React.FormEvent) {
+  async function submitBid(ev: FormEvent) {
     ev.preventDefault();
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
-    const ended = detail ? Number(detail.endTime) <= nowSec() : false;
-    if (ended) return setToast("Phiên đã kết thúc.");
-    if (!fheReady) return setToast("FHE key chưa sẵn sàng, thử lại sau ít giây.");
+    if (Number(detail.endTime) <= nowSec()) return setToast("Phiên đã kết thúc.");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
@@ -370,36 +347,43 @@ export default function App() {
       const signer = await provider.getSigner();
       const me = await signer.getAddress();
 
-      // 1) Đảm bảo public key
+      // 1) FHE public key
       await waitPublicKey(active, setBusy);
 
-      // 2) Encrypt
-      const enc1 = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
+      // 2) Encrypt + retry
+      const enc = await encryptBidWithRetry(active, me, BigInt(bid), setBusy);
 
-      // 3) Gửi lần 1
-      setBusy("Sending transaction…");
+      // 3) Encode calldata for our auction contract
+      const iface = new Interface(auctionAbi);
+      const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
+
+      // 4) PRE-FLIGHT SIMULATION (off-chain!) – tuyệt đối không gửi tx tới relayer
+      setBusy("Preflight (simulating)...");
       try {
-        await doSendBid(signer, active, enc1.handles[0], enc1.inputProof);
-        setToast(`Đã gửi bid (encrypted) = ${bid}`);
-        setBid("");
-        await refreshDetail();
-        setBusy(null);
-        return;
-      } catch (err1: any) {
-        // 4) Nếu revert -> re-encrypt & gửi lại 1 lần (proof mới)
-        const decoded1 = decodeRevert(err1);
-        const base1 =
-          err1?.shortMessage || err1?.info?.error?.message || err1?.message || "";
-        if (!/revert|Invalid|Proof|PublicKey|input|CALL_EXCEPTION/i.test((base1 || "") + (decoded1 || ""))) {
-          throw err1; // lỗi khác -> ném ra
-        }
-        setBusy("Retrying with fresh proof…");
-        const enc2 = await encryptBidWithRetry(active, me, BigInt(bid));
-        await doSendBid(signer, active, enc2.handles[0], enc2.inputProof);
-        setToast(`Đã gửi bid (encrypted) = ${bid} (retry)`);
-        setBid("");
-        await refreshDetail();
+        await signer.call({ to: active, data }); // eth_call
+      } catch (simErr: any) {
+        const reason = decodeRevert(simErr);
+        const base =
+          simErr?.shortMessage || simErr?.info?.error?.message || simErr?.message || "Unknown error";
+        const hint = /Invalid|Cipher|Proof|PublicKey|input/i.test((reason || "") + base)
+          ? " (Có thể FHE key/proof chưa đồng bộ. Đợi 20–60s rồi thử lại.)"
+          : "";
+        throw new Error(`Preflight failed: ${base}${reason ? " | Revert: " + reason : ""}${hint}`);
       }
+
+      // 5) Estimate gas rồi gửi thẳng tới CONTRACT ĐẤU GIÁ
+      setBusy("Sending transaction…");
+      let gasLimit = 1_200_000n;
+      try {
+        const est = await signer.estimateGas({ to: active, data });
+        if (est && est > 0n) gasLimit = est + (est / 5n);
+      } catch {}
+      const tx = await signer.sendTransaction({ to: active, data, gasLimit });
+      await tx.wait();
+
+      setToast(`Đã gửi bid (encrypted) = ${bid}\nTx sẽ hiển thị trên Etherscan của chính hợp đồng đang Active.`);
+      setBid("");
+      await refreshDetail();
     } catch (err: any) {
       const decoded = decodeRevert(err);
       const base =
@@ -417,8 +401,7 @@ export default function App() {
   async function settleAndReveal() {
     if (!active) return;
     if (!detail) return setToast("Địa chỉ không tương thích.");
-    const ended = detail ? Number(detail.endTime) <= nowSec() : false;
-    if (!ended) return setToast("Chưa hết hạn.");
+    if (Number(detail.endTime) > nowSec()) return setToast("Chưa hết hạn.");
 
     try {
       const anyWin = window as any;
@@ -433,10 +416,10 @@ export default function App() {
 
       const inputs = (frag as any).inputs ?? [];
       let tx;
-      if (inputs.length === 0) tx = await (c as any).settle();
+      if (inputs.length === 0) tx = await c.settle();
       else if (inputs.length === 1 && inputs[0].type === "address[]") {
         const me = await signer.getAddress();
-        tx = await (c as any).settle([me]);
+        tx = await c.settle([me]);
       } else {
         throw new Error(`Unsupported settle signature: ${(frag as any).format("full")}`);
       }
@@ -461,7 +444,9 @@ export default function App() {
       const signer = await provider.getSigner();
 
       if (!auctionBytecode) {
-        return setToast("Thiếu bytecode trong FHEAuction.json (artifact Hardhat).");
+        return setToast(
+          "Thiếu bytecode trong FHEAuction.json. Hãy dùng artifact Hardhat (có bytecode)."
+        );
       }
 
       const factory = new ContractFactory(auctionAbi, auctionBytecode, signer);
@@ -471,17 +456,9 @@ export default function App() {
       const newAddr: string = c.target;
 
       setToast(`Deploy thành công: ${newAddr}`);
-
       const next = Array.from(new Set([newAddr, ...addrList]));
       setAddrList(next);
       setActive(newAddr);
-
-      // Poll tới khi getStatus() đọc được
-      for (let i = 0; i < 15; i++) {
-        const st = await safeReadStatus(newAddr);
-        if (st) break;
-        await sleep(1000);
-      }
       await refreshDetail();
     } catch (err: any) {
       const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
@@ -489,13 +466,17 @@ export default function App() {
     }
   }
 
-  /** ---------- Simple quick create UI ---------- */
+  /** ---------- Simple quick create UI (header button) ---------- */
   const [creating, setCreating] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [newMinutes, setNewMinutes] = useState(10);
 
   /** ---------- Render ---------- */
-  const ended = detail ? Number(detail.endTime) <= nowSec() : false;
+  const canSubmit =
+    !!detail &&
+    Number(detail.endTime) > nowSec() &&
+    !!fheReady &&
+    !busy;
 
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
@@ -640,13 +621,13 @@ export default function App() {
                     step={1}
                     value={bid}
                     onChange={(e) => setBid(e.target.value)}
-                    disabled={!detail || ended || !!busy}
+                    disabled={!canSubmit}
                     style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }}
                   />
                 </label>
                 <button
                   type="submit"
-                  disabled={!!busy || !detail || ended}
+                  disabled={!canSubmit}
                   style={{ padding: "10px 16px", borderRadius: 8, background: "#2563eb", color: "white" }}
                 >
                   {busy ? busy : (fheReady ? "Submit encrypted bid" : "Waiting FHE key…")}
@@ -656,7 +637,7 @@ export default function App() {
               <div style={{ marginTop: 10 }}>
                 <button
                   onClick={settleAndReveal}
-                  disabled={!detail || !ended}
+                  disabled={!detail || !(Number(detail.endTime) <= nowSec())}
                   style={{ padding: "8px 14px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}
                 >
                   Settle & reveal
