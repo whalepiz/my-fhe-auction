@@ -1,38 +1,17 @@
-// frontend/src/config.ts
+/* frontend/src/config.ts */
+export const CHAIN_ID = 11155111; // Sepolia
 
-/** Chain: Sepolia */
-export const CHAIN_ID = 11155111 as const;
+// Relayer testnet của Zama cho Sepolia
+export const RELAYER_URL = "https://relayer.testnet.zama.cloud";
 
-/** RPC endpoints fallback để đọc on-chain trong trình duyệt */
+// RPC đọc chuỗi (dùng luân phiên để bền hơn)
 export const RPCS: string[] = [
   "https://eth-sepolia.public.blastapi.io",
-  "https://endpoints.omniatech.io/v1/eth/sepolia/public",
   "https://ethereum-sepolia.publicnode.com",
+  "https://endpoints.omniatech.io/v1/eth/sepolia/public",
 ];
 
-/** Lấy danh sách auctions từ biến môi trường (Vercel/Local) nếu có */
-function parseEnvAuctions(): string[] {
-  const raw = (import.meta as any)?.env?.VITE_AUCTIONS ?? "";
-  return String(raw)
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => /^0x[a-fA-F0-9]{40}$/.test(s));
-}
-
-/** Danh sách mặc định (khi không set VITE_AUCTIONS) */
-export const AUCTIONS: string[] = (() => {
-  const fromEnv = parseEnvAuctions();
-  if (fromEnv.length) return fromEnv;
-  return [
-    // điền sẵn địa chỉ nếu muốn:
-    // "0x1234....",
-  ];
-})();
-
-/** Metadata hiển thị (tuỳ chọn) */
-export const AUCTION_META: Record<
-  string,
-  { title?: string; image?: string; description?: string }
-> = {
-  // "0x1234...": { title: "Rare NFT #1" },
-};
+// (tùy chọn) seed sẵn một vài contract address nếu muốn, để trống cũng được.
+// App sẽ lưu danh sách vào localStorage nên không bắt buộc.
+export const AUCTIONS: string[] = [];
+export const AUCTION_META: Record<string, { title?: string }> = {};

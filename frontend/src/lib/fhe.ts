@@ -1,93 +1,89 @@
-// frontend/src/lib/fhe.ts
-import { CHAIN_ID } from "../config";
+/* frontend/src/lib/fhe.ts */
+import { JsonRpcProvider } from "ethers";
+import { CHAIN_ID, RELAYER_URL, RPCS } from "../config";
+// @ts-ignore ESM types
+import { createInstance } from "@fhevm/sdk";
+import Relayer from "@zama-fhe/relayer-sdk";
 
-/**
- * Quan trọng:
- * Một số bundle trên trình duyệt thiếu "global" → polyfill để tránh black screen.
- */
-// @ts-ignore
-if (typeof (globalThis as any).global === "undefined") {
-  // @ts-ignore
-  (globalThis as any).global = globalThis;
+let _fhe: any | null = null;
+let _relayer: any | null = null;
+
+function pickRpc(): string {
+  return RPCS[Math.floor(Math.random() * RPCS.length)];
 }
 
-let _instancePromise: Promise<any> | null = null;
-
-/** Lazy create FHE instance chuẩn cho Sepolia */
-export async function getFheInstance(): Promise<any> {
-  if (_instancePromise) return _instancePromise;
-
-  _instancePromise = (async () => {
-    // import động để giảm lỗi type ở môi trường build
-    const mod: any = await import("@fhevm/sdk");
-    const createInstance: any = mod?.createInstance ?? mod?.default?.createInstance ?? mod?.default;
-
-    // Tạo instance cho Sepolia. SDK tự biết KMS/Relayer của Sepolia.
-    const inst = await createInstance({
-      chainId: CHAIN_ID,
-      network: "sepolia",
-    });
-
-    return inst;
-  })();
-
-  return _instancePromise;
+function makeReadProvider(): JsonRpcProvider {
+  return new JsonRpcProvider(pickRpc());
 }
 
-/** Ngủ */
-export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Lấy/cấp phát FHE instance — KHÔNG cần KMS thủ công */
+export async function getFheInstance() {
+  if (_fhe) return _fhe;
 
-/** Đợi public key cho contract, có retry */
-export async function waitForPublicKey(
-  contractAddr: string,
-  timeoutMs = 120_000
-): Promise<void> {
-  const inst = await getFheInstance();
+  _fhe = await createInstance({
+    chainId: CHAIN_ID,
+    provider: makeReadProvider(),
+  });
 
-  // Nếu SDK có sẵn waitForPublicKey thì dùng
-  if (typeof inst?.waitForPublicKey === "function") {
-    await inst.waitForPublicKey(contractAddr, { timeoutMs });
+  return _fhe;
+}
+
+/** Relayer client (xin input-proof) */
+export async function getRelayer() {
+  if (_relayer) return _relayer;
+  _relayer = new Relayer({
+    relayerUrl: RELAYER_URL,
+    chainId: CHAIN_ID,
+  });
+  return _relayer;
+}
+
+/** Đợi public key cho contract (SDK mới có waitForPublicKey; cũ thì fallback getPublicKey) */
+export async function waitForPublicKey(contractAddr: string) {
+  const fhe = await getFheInstance();
+  if (typeof fhe.waitForPublicKey === "function") {
+    await fhe.waitForPublicKey(contractAddr, { timeout: 120000 });
     return;
   }
-
-  // Fallback poll getPublicKey
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  // Fallback
+  for (let i = 0; i < 8; i++) {
     try {
-      if (typeof inst?.getPublicKey === "function") {
-        await inst.getPublicKey(contractAddr);
-        return;
-      }
-      // nếu SDK quá cũ → thoát vòng cho có thông báo
+      await fhe.getPublicKey(contractAddr);
       break;
     } catch {
-      await sleep(1500);
+      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
     }
   }
-  throw new Error("Public key not ready");
 }
 
-/** Mã hoá một giá bid uint32 kèm retry */
-export async function encryptBidWithRetry(
+/** Mã hoá uint32 + xin input-proof từ relayer (có retry nhẹ) */
+export async function encryptUint32WithProof(
   contractAddr: string,
   signerAddr: string,
-  value: bigint,
-  tries = 8
-): Promise<any> {
-  const inst = await getFheInstance();
+  value: bigint
+): Promise<{ handles: string[]; inputProof: string }> {
+  const fhe = await getFheInstance();
+  const relayer = await getRelayer();
 
-  for (let i = 1; i <= tries; i++) {
+  // đảm bảo key sẵn
+  await waitForPublicKey(contractAddr);
+
+  let lastErr: any = null;
+  for (let i = 0; i < 5; i++) {
     try {
-      const buf = inst.createEncryptedInput(contractAddr, signerAddr);
-      buf.add32(value);
-      const enc = await buf.encrypt();
-      return enc;
+      const enc = fhe.createEncryptedInput(contractAddr, signerAddr);
+      enc.add32(value);
+      const input = await enc.encrypt();
+
+      const proof = await relayer.getInputProof(input);
+      return { handles: input.handles, inputProof: proof };
     } catch (e: any) {
-      const msg = String(e?.message || e || "");
-      // lỗi KMS/relayer/public-key thường có ở lần đầu → retry luỹ tiến
-      if (i === tries) throw new Error(msg || "encrypt failed");
-      await sleep(800 * i);
+      lastErr = e;
+      const m = String(e?.message || "");
+      const retriable = /timeout|fetch|500|gateway|public key|network/i.test(m);
+      if (!retriable) break;
+      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
     }
   }
-  throw new Error("encrypt failed");
+  throw lastErr ?? new Error("encryptUint32WithProof failed");
 }
