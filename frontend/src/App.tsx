@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, type FormEvent } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   BrowserProvider,
   Contract,
@@ -17,7 +17,6 @@ const auctionBytecode: string | undefined = (auctionAbiJson as any)?.bytecode;
 
 /** ---------- Types ---------- */
 type Wallet = { address: string | null; chainId: number | null };
-
 type AuctionStatus = {
   item: string;
   endTime: bigint;
@@ -33,18 +32,18 @@ const RPCS = [
   "https://ethereum-sepolia.publicnode.com",
   "https://rpc2.sepolia.org",
 ];
+
 const LS_KEY = "fhe_auctions";
-const MIN_WARM_MS = 20_000; // thời gian làm ấm FHE key tối thiểu (20s)
 
 function fmtTs(ts?: bigint) {
   if (!ts) return "-";
   const d = new Date(Number(ts) * 1000);
   return d.toLocaleString();
 }
-function nowSec() { return Math.floor(Date.now() / 1000); }
-function nowMs() { return Date.now(); }
-function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
-function isAddress(s: string) { return /^0x[a-fA-F0-9]{40}$/.test(s); }
+const nowSec = () => Math.floor(Date.now() / 1000);
+const nowMs = () => Date.now();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const isAddress = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
 function fmtRemain(s: number) {
   if (s <= 0) return "0s";
   const d = Math.floor(s / 86400);
@@ -108,15 +107,8 @@ async function safeReadStatus(addr: string): Promise<AuctionStatus | null> {
       }
       return st;
     });
-  } catch (err: any) {
-    const msg = String(err?.message || err);
-    if (
-      err?.code === "BAD_DATA" ||
-      err?.value === "0x" ||
-      /bad data|invalid|selector|reverted/i.test(msg)
-    ) {
-      return null;
-    }
+  } catch {
+    // đánh dấu "incompatible" nếu decode lỗi / selector sai / v.v.
     return null;
   }
 }
@@ -130,6 +122,7 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
       await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 120000 });
       return;
     }
+    // fallback getPublicKey nhiều lần
     for (let i = 1; i <= 8; i++) {
       try {
         setBusy?.(`Fetching FHE key… (try ${i}/8)`);
@@ -146,6 +139,7 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
     setBusy?.(null);
   }
 }
+
 async function isFheReady(contractAddr: string): Promise<boolean> {
   try {
     const inst = await getFheInstance();
@@ -162,6 +156,7 @@ async function isFheReady(contractAddr: string): Promise<boolean> {
     return false;
   }
 }
+
 async function encryptBidWithRetry(
   contractAddr: string,
   signerAddr: string,
@@ -185,6 +180,7 @@ async function encryptBidWithRetry(
   }
   throw new Error("FHE key not ready.");
 }
+
 function decodeRevert(err: any): string | null {
   try {
     const data =
@@ -206,49 +202,107 @@ function decodeRevert(err: any): string | null {
   }
 }
 
-/** ---------- Preflight simulate + gas (có from) ---------- */
-async function preflight(signer: any, to: string, data: string) {
-  const from = await signer.getAddress();
-
-  try {
-    // simulate eth_call với đúng from (proof phụ thuộc msg.sender)
-    await signer.call({ to, data, from });
-  } catch (err: any) {
-    const reason = decodeRevert(err);
-    const base = err?.shortMessage || err?.info?.error?.message || err?.message || "reverted";
-    throw new Error("Simulation failed: " + (reason ? reason : base));
+/** ---------- Preflight simulate (eth_call) ---------- */
+async function preflightBid(
+  to: string,
+  data: string,
+  from: string,
+  setBusy?: (s: string | null) => void
+) {
+  // tối đa ~45s (30 lần * 1.5s)
+  for (let i = 1; i <= 30; i++) {
+    setBusy?.(`Preflight… (try ${i}/30)`);
+    for (const url of RPCS) {
+      try {
+        const p = new JsonRpcProvider(url);
+        await p.call({ to, data, from }); // succeed => không throw
+        setBusy?.(null);
+        return;
+      } catch (e: any) {
+        // bỏ qua, thử RPC khác / vòng sau
+      }
+    }
+    await sleep(1500);
   }
-
-  try {
-    const g = await signer.estimateGas({ to, data, from });
-    return g && g > 0n ? g : 1_200_000n;
-  } catch (err: any) {
-    const reason = decodeRevert(err);
-    const base = err?.shortMessage || err?.info?.error?.message || err?.message || "estimateGas reverted";
-    throw new Error("Gas estimate failed: " + (reason ? reason : base));
-  }
+  setBusy?.(null);
+  // Không blocking — vẫn cho gửi, nhưng đã warm đủ lâu
 }
 
 /** ---------- Small UI bits ---------- */
-function Badge({ color, children }: { color: "green" | "gray" | "orange" | "blue"; children: React.ReactNode }) {
+function Badge({
+  color,
+  children,
+}: {
+  color: "green" | "gray" | "orange" | "blue";
+  children: React.ReactNode;
+}) {
   const bg =
-    color === "green" ? "#103e2a" :
-    color === "orange" ? "#3f2b00" :
-    color === "blue" ? "#0b274d" : "#2a2d35";
+    color === "green"
+      ? "#103e2a"
+      : color === "orange"
+      ? "#3f2b00"
+      : color === "blue"
+      ? "#0b274d"
+      : "#2a2d35";
   const tx =
-    color === "green" ? "#50e3a4" :
-    color === "orange" ? "#ffca70" :
-    color === "blue" ? "#75a7ff" : "#cbd5e1";
-  return <span style={{ background: bg, color: tx, padding: "2px 8px", borderRadius: 999, fontSize: 12 }}>{children}</span>;
+    color === "green"
+      ? "#50e3a4"
+      : color === "orange"
+      ? "#ffca70"
+      : color === "blue"
+      ? "#75a7ff"
+      : "#cbd5e1";
+  return (
+    <span
+      style={{
+        background: bg,
+        color: tx,
+        padding: "2px 8px",
+        borderRadius: 999,
+        fontSize: 12,
+      }}
+    >
+      {children}
+    </span>
+  );
 }
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
-    <div style={{ position: "fixed", right: 16, bottom: 16, background: "#101826", color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 12, width: 300 }}>
-      <div style={{ padding: "10px 12px", borderBottom: "1px solid #1f2937", fontWeight: 600 }}>Thông báo</div>
-      <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>{text}</div>
-      <div style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}>
-        <button onClick={onClose} style={{ padding: "6px 12px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}>OK</button>
+    <div
+      style={{
+        position: "fixed",
+        right: 16,
+        bottom: 16,
+        background: "#101826",
+        color: "#e5e7eb",
+        border: "1px solid #1f2937",
+        borderRadius: 12,
+        width: 300,
+        zIndex: 50,
+      }}
+    >
+      <div
+        style={{
+          padding: "10px 12px",
+          borderBottom: "1px solid #1f2937",
+          fontWeight: 600,
+        }}
+      >
+        Thông báo
+      </div>
+      <div style={{ padding: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>
+        {text}
+      </div>
+      <div
+        style={{ padding: 12, display: "flex", justifyContent: "flex-end" }}
+      >
+        <button
+          onClick={onClose}
+          style={{ padding: "6px 12px", borderRadius: 8, background: "#111827", color: "#e5e7eb" }}
+        >
+          OK
+        </button>
       </div>
     </div>
   );
@@ -346,7 +400,8 @@ export default function App() {
   /** FHE Readiness */
   const [fheReady, setFheReady] = useState<boolean>(false);
   const [fheReadySince, setFheReadySince] = useState<number | null>(null);
-  const fheWarmed = fheReady && (fheReadySince !== null ? nowMs() - fheReadySince >= MIN_WARM_MS : false);
+  // chỉ cần “đã sẵn sàng” >= 10s là được
+  const fheWarmed = fheReady && (fheReadySince !== null ? nowMs() - fheReadySince >= 10_000 : false);
 
   useEffect(() => {
     let stop = false;
@@ -366,13 +421,12 @@ export default function App() {
   }, [active]);
 
   /** Actions */
-  async function submitBid(ev: FormEvent) {
+  async function submitBid(ev: React.FormEvent) {
     ev.preventDefault();
     if (!wallet.address) return setToast("Hãy kết nối ví trước.");
     if (!detail) return setToast("Địa chỉ không tương thích FHEAuction.");
     if (!/^\d+$/.test(bid)) return setToast("Bid phải là số nguyên không âm.");
     if (Number(detail?.endTime || 0) <= nowSec()) return setToast("Phiên đã kết thúc.");
-    if (!fheWarmed) return setToast("FHE key chưa sẵn sàng/đang làm ấm, đợi vài giây rồi thử lại.");
 
     const anyWin = window as any;
     const provider = new BrowserProvider(anyWin.ethereum);
@@ -393,12 +447,18 @@ export default function App() {
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      // 4) Preflight (simulate + estimateGas) với from = ví của bạn
-      setBusy("Sending transaction…");
-      const est = await preflight(signer, active, data);
-      const gasLimit = est + (est / 5n);
+      // 4) Preflight simulate (eth_call loop)
+      await preflightBid(active, data, me, setBusy);
 
-      // 5) Send
+      // 5) Ước lượng gas (không bắt buộc)
+      let gasLimit = 1_200_000n;
+      try {
+        const est = await signer.estimateGas({ to: active, data });
+        if (est && est > 0n) gasLimit = est + (est / 5n);
+      } catch {}
+
+      // 6) Gửi thật
+      setBusy("Sending transaction…");
       const tx = await signer.sendTransaction({ to: active, data, gasLimit });
       await tx.wait();
 
@@ -415,9 +475,10 @@ export default function App() {
         err?.receipt?.transactionHash ||
         err?.hash || "";
       const link = txHash ? `\nTx: https://sepolia.etherscan.io/tx/${txHash}` : "";
-      const hint = /execution reverted|InvalidInput|Cipher|Proof|PublicKey|Invalid|input/i.test(base + reason)
-        ? " (Có thể FHE key/proof chưa đồng bộ hoàn toàn. Đợi 20–60s rồi thử lại.)"
-        : "";
+      const hint =
+        /execution reverted|InvalidInput|Cipher|Proof|PublicKey|Invalid|input|simulation/i.test((base || "") + reason)
+          ? " (Có thể FHE key/proof chưa đồng bộ. App đã preflight, nhưng node/wallet vẫn mô phỏng fail. Đợi 20–60s rồi thử lại.)"
+          : "";
       setToast("Bid thất bại: " + base + reason + hint + link);
     } finally {
       setBusy(null);
@@ -470,9 +531,7 @@ export default function App() {
       const signer = await provider.getSigner();
 
       if (!auctionBytecode) {
-        return setToast(
-          "Thiếu bytecode trong FHEAuction.json. Hãy dùng artifact Hardhat (có bytecode)."
-        );
+        return setToast("Thiếu bytecode trong FHEAuction.json (artifact Hardhat).");
       }
 
       const factory = new ContractFactory(auctionAbi, auctionBytecode, signer);
@@ -483,38 +542,32 @@ export default function App() {
 
       setToast(`Deploy thành công: ${newAddr}`);
 
-      // Cập nhật list + active
+      // đưa lên đầu danh sách + set active
       const next = Array.from(new Set([newAddr, ...addrList]));
       setAddrList(next);
       setActive(newAddr);
 
-      // Poll tối đa ~30s để đọc được getStatus() (khỏi cần bấm Refresh)
-      let got = false;
+      // đợi contract sẵn sàng trả getStatus() (poll)
       for (let i = 0; i < 20; i++) {
         const st = await safeReadStatus(newAddr);
-        if (st) {
-          setDetail(st);
-          setListStatus((m) => ({ ...m, [newAddr]: st }));
-          got = true;
-          break;
-        }
+        if (st) break;
         await sleep(1500);
       }
-      if (!got) {
-        setListStatus((m) => ({ ...m, [newAddr]: null }));
-      }
+      await refreshDetail();
     } catch (err: any) {
       const msg = err?.shortMessage || err?.info?.error?.message || err?.message || "Unknown error";
       setToast("Deploy thất bại: " + msg);
     }
   }
 
-  /** ---------- Simple quick create UI (header button) ---------- */
+  /** ---------- Simple quick create UI ---------- */
   const [creating, setCreating] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [newMinutes, setNewMinutes] = useState(10);
 
   /** ---------- Render ---------- */
+  const ended = detail ? Number(detail.endTime) <= nowSec() : false;
+
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -658,16 +711,16 @@ export default function App() {
                     step={1}
                     value={bid}
                     onChange={(e) => setBid(e.target.value)}
-                    disabled={!detail || Number(detail?.endTime || 0) <= nowSec() || !!busy || !fheWarmed}
+                    disabled={!detail || Number(detail?.endTime || 0) <= nowSec() || !!busy}
                     style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #374151", background: "#0b1220", color: "#e5e7eb" }}
                   />
                 </label>
                 <button
                   type="submit"
-                  disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec() || !fheWarmed}
+                  disabled={!!busy || !detail || Number(detail?.endTime || 0) <= nowSec()}
                   style={{ padding: "10px 16px", borderRadius: 8, background: "#2563eb", color: "white" }}
                 >
-                  {busy ? busy : (fheWarmed ? "Submit encrypted bid" : (fheReady ? "Warming FHE key…" : "Waiting FHE key…"))}
+                  {busy ? busy : "Submit encrypted bid"}
                 </button>
               </form>
 
