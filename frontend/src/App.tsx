@@ -121,7 +121,6 @@ async function waitPublicKey(contractAddr: string, setBusy?: (s: string | null) 
       await (inst as any).waitForPublicKey(contractAddr, { timeoutMs: 120000 });
       return;
     }
-    // fallback loop
     for (let i = 1; i <= 8; i++) {
       try {
         setBusy?.(`Fetching FHE key… (try ${i}/8)`);
@@ -163,7 +162,6 @@ async function encryptBidWithRetry(
   throw new Error("FHE key not ready.");
 }
 
-/** Decode revert reason if possible */
 function decodeRevert(err: any): string | null {
   try {
     const data =
@@ -195,11 +193,9 @@ async function preflightOnchain(
   for (let i = 1; i <= 20; i++) {
     try {
       setBusy?.(`Preflight… (try ${i}/20)`);
-      // Nếu không throw → OK để gửi thật
-      await signer.call({ to: contractAddr, data: calldata });
+      await signer.call({ to: contractAddr, data: calldata }); // pass => OK để gửi thật
       return;
-    } catch (e: any) {
-      // nếu revert → thường proof chưa đồng bộ, đợi rồi thử lại
+    } catch {
       await sleep(1000 + i * 250);
     }
   }
@@ -347,10 +343,10 @@ export default function App() {
       const iface = new Interface(auctionAbi);
       const data = iface.encodeFunctionData("bid", [enc.handles[0], enc.inputProof]);
 
-      // 4) NEW: preflight on-chain until pass, rồi mới mở MetaMask
+      // 4) Preflight on-chain (eth_call) cho tới khi pass
       await preflightOnchain(signer, active, data, setBusy);
 
-      // 5) Ước lượng gas và gửi thật
+      // 5) Ước lượng gas & gửi thật
       setBusy("Sending transaction…");
       let gasLimit = 1_200_000n;
       try {
@@ -453,8 +449,6 @@ export default function App() {
   const [newMinutes, setNewMinutes] = useState(10);
 
   /** ---------- Render ---------- */
-  const ended = detail ? Number(detail.endTime) <= nowSec() : false;
-
   return (
     <div style={{ maxWidth: 1060, margin: "20px auto", padding: "0 12px", color: "#e5e7eb", fontFamily: "Inter, system-ui" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -553,7 +547,7 @@ export default function App() {
                     </a>
                     <code
                       title="Copy"
-                      onClick={() => navigator.clipboard?.writeText(addr).then(() => setToast("Đã copy địa chỉ hợp đồng."))}
+                      onClick={() => navigator.clipboard?.writeText(addr)}
                       style={{ fontSize: 11, opacity: 0.7, cursor: "pointer" }}
                     >
                       {addr.slice(0, 8)}…{addr.slice(-6)}
@@ -633,4 +627,3 @@ export default function App() {
     </div>
   );
 }
-
